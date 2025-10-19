@@ -115,17 +115,11 @@ class TradingEngine:
         logger.info(f"Aquecendo indicadores com até {self.warm_up_candles} velas...")
         try:
             with SessionLocal() as db_session:
-                # Ordenar por timestamp ASCENDENTE para pegar as mais recentes no final
-                historical_candles = db_session.query(Kline).filter(
-                    Kline.symbol == self.symbol
-                ).order_by(Kline.timestamp.asc()).limit(self.warm_up_candles).all() # Mudar para .asc() ? Não, pegar as N ultimas. .desc() está certo.
-
-                # Corrigir: pegar as N mais recentes
+                # Pega as N velas mais recentes do banco de dados (ordenadas da mais nova para a mais antiga).
                 historical_candles = db_session.query(Kline).filter(
                     Kline.symbol == self.symbol
                 ).order_by(Kline.timestamp.desc()).limit(self.warm_up_candles).all()
-                historical_candles.reverse() # Ordenar do mais antigo para mais novo
-
+                historical_candles.reverse()  # Inverte a lista para ter a ordem cronológica correta (mais antigo -> mais novo).
 
             min_candles_needed = max(self.strategy_periods) + 50 if self.strategy_periods else 100 # Default se períodos não carregados
 

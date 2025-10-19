@@ -89,18 +89,21 @@ class StrategyBridge(BacktestingStrategy):
         self.ema_long = self.I(lambda x: self.df[self.strategy.ema_long_col].values, name="EMA_Long")
         self.rsi = self.I(lambda x: self.df[self.strategy.rsi_col].values, name="RSI")
         self.ema_regime = self.I(lambda x: self.df[self.strategy.regime_col].values, name="EMA_Regime")
-        self.atr_val = self.I(lambda x: self.df[self.strategy.atr_col].values, name="ATR") 
-        self.adx_val = self.I(lambda x: self.df.get(self.strategy.adx_col, float('nan')), name="ADX")
+        self.atr_val = self.I(lambda x: self.df[self.strategy.atr_col].values, name="ATR", overlay=False) # Correct
+        self.adx_val = self.I(lambda x: self.df[self.strategy.adx_col].values, name="ADX", overlay=False) # Correct
 
 
     def next(self):
         current_index = len(self.data.Close) - 1
         
-        if current_index < 2:
+        # Garante que temos dados suficientes para os indicadores (ex: EMA 200)
+        # O +2 é para ter a vela atual e a anterior para a lógica de cruzamento.
+        min_bars_needed = self.strategy.regime_filter_period + 2
+        if current_index < min_bars_needed:
             return
             
-        # Pega o DataFrame até a vela atual
-        df_slice = self.df.iloc[:current_index + 1]
+        # Pega um slice recente do DataFrame, em vez do DF inteiro. Mais eficiente.
+        df_slice = self.df.iloc[current_index - min_bars_needed : current_index + 1]
         
         # 1. Gera o sinal
         signal_data = self.strategy.generate_signal(df_slice)

@@ -53,7 +53,7 @@ def run_backfill():
     with open('configs/btc_usdt_config.yaml', 'r') as f:
         config = yaml.safe_load(f)
     
-    days_to_fetch = config.get('engine_params', {}).get('days_to_backfill', 90)
+    days_to_fetch = config.get('engine_params', {}).get('days_to_backfill', 365)
     logging.info(f"Configuração: Buscando {days_to_fetch} dias de dados para {SYMBOL} em {TIMEFRAME}m.")
 
     try:
