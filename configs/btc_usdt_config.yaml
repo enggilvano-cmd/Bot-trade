@@ -14,7 +14,7 @@ engine_params:
   # Deve ser maior que o maior indicador (ex: regime_filter_period)
   warm_up_candles: 2000
   # Número de dias para buscar dados históricos no script backfill.py
-  days_to_backfill: 90 # <--- NOVO PARÂMETRO
+  days_to_backfill: 90 
 
 # Parâmetros da Estratégia
 strategy_params:
@@ -23,26 +23,39 @@ strategy_params:
   rsi_period: 14
   regime_filter_period: 200  # Filtro de Regime (EMA Longa)
 
-  # --- [MELHORIA A++] FILTRO DE TENDÊNCIA ADX ---
-  # Usado para evitar mercados laterais ("chop")
+  # --- [MELHORIA A++] Filtro ADX ---
+  # Define a força mínima da tendência (ADX) para abrir uma posição.
+  # 0 = Desativado
   adx_period: 14
-  # O bot só operará se o ADX estiver ACIMA deste valor (ex: 20 ou 25)
-  adx_threshold: 20
+  adx_threshold: 0 # 20
 
 # Parâmetros de Risco
 risk_params:
   atr_period: 14
-  atr_multiplier: 2.5
-  risk_per_trade: 1.0        # (Risco base de 1%)
-  risk_reward_ratio: 0.0     # (Desativa TP Fixo, usa Trailing Stop)
-  min_balance_usdt: 50.0
+  atr_multiplier: 1.0
+  risk_per_trade: 2.0  # Risco em % da carteira (ex: 2.0 para 2%)
+  min_balance_usdt: 100 # Saldo mínimo para operar
+  
+  # --- [IMPLEMENTAÇÃO NÍVEL AVANÇADO] Fechamento Parcial (TP1) ---
+  # Se > 0, define um Take Profit parcial (TP1) baseado no Risco/Retorno
+  # Se 0, o bot usará apenas o sinal oposto ou Trailing Stop para fechar 100%.
+  tp1_risk_reward_ratio: 1.5 # Ex: 1.5 para 1:1.5 R:R
+  # Percentual da posição a ser fechada ao atingir o TP1 (ex: 0.5 para 50%)
+  tp1_close_percentage: 0.5
+  # Se True, move o Stop Loss para o preço de entrada (Breakeven) após o TP1
+  move_sl_to_breakeven_on_tp1: True
+  
+  # --- [MELHORIA A++] Filtro de Funding Rate ---
+  # Se < 0, ignora sinais LONG se o funding rate estiver *abaixo* deste valor (ex: -0.0005)
+  # -1.0 = Desativado
+  max_negative_funding_rate: -0.00075 # -1.0
 
-  # Parâmetros de Risco Dinâmico
-  rsi_conviction_threshold: 60    # (Acima de 60 (long) ou abaixo de 40 (short))
-  high_conviction_risk_mult: 1.0  # (Risco total: 1.0 * 1.0% = 1.0%)
-  low_conviction_risk_mult: 0.5   # (Meio risco: 0.5 * 1.0% = 0.5%)
-
-  # --- [MELHORIA A++] FILTRO DE TAXA DE FINANCIAMENTO ---
-  # Ignora trades LONG se a taxa de financiamento for menor (mais negativa) que este valor.
-  # Ex: -0.001 significa -0.1%. Use -1.0 para desativar.
-  max_negative_funding_rate: -0.001
+  # --- [MELHORIA A++] Risco Dinâmico (Opcional) ---
+  # Ajusta o 'risk_per_trade' com base na "convicção" do RSI
+  dynamic_risk_params:
+    # Se o RSI > threshold (long) ou < (100-threshold) (short), usa 'high_conviction_risk_mult'
+    # Caso contrário, usa 'low_conviction_risk_mult'
+    # 0 = Desativado
+    rsi_conviction_threshold: 0 # 60
+    high_conviction_risk_mult: 1.0 # Multiplicador (ex: 1.0 = 100% do risco)
+    low_conviction_risk_mult: 1.0 # Multiplicador (ex: 0.5 = 50% do risco)
