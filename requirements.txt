@@ -1,0 +1,12 @@
+pybit
+pandas
+pandas-ta
+python-dotenv
+PyYAML
+python-telegram-bot
+backtesting
+SQLAlchemy
+alembic
+psycopg2-binary
+redis
+tenacity

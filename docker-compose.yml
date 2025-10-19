@@ -1,0 +1,37 @@
+services:
+  trading-system:
+    build: .
+    container_name: trading_system_app
+    restart: always
+    volumes:
+      # Monta as configurações para que possam ser alteradas sem reconstruir a imagem
+      - ./configs:/app/configs
+    env_file:
+      - .env
+    environment: # Usa substituição de variáveis do .env
+      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+    # Adiciona dependência do Redis e do DB
+    depends_on:
+      - db
+      - redis
+
+  # Serviço Redis
+  redis:
+    image: redis:7-alpine
+    container_name: trading_redis
+    restart: always
+    volumes:
+      - redis_data:/data
+
+  # Serviço de banco de dados (Postgres)
+  db:
+    image: postgres:15
+    container_name: trading_db
+    restart: always
+    env_file: # Também usa o .env para consistência
+      - .env
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+volumes:
+  postgres_data:
+  redis_data:

@@ -1,0 +1,48 @@
+# Configurações de Execução
+live_mode: False
+# --- [MELHORIA A++] MODO SOMBRA ---
+# Se True (e live_mode=True), o bot rodará com dados reais
+# mas não enviará ordens. Apenas registrará as decisões no log.
+shadow_mode: False
+symbol: "BTCUSDT"
+timeframe: 15
+strategy_name: "EmaRsiStrategy"
+
+# Parâmetros do Engine
+engine_params:
+  # Número de velas para carregar no início e "aquecer" os indicadores
+  # Deve ser maior que o maior indicador (ex: regime_filter_period)
+  warm_up_candles: 2000
+  # Número de dias para buscar dados históricos no script backfill.py
+  days_to_backfill: 90 # <--- NOVO PARÂMETRO
+
+# Parâmetros da Estratégia
+strategy_params:
+  short_ema: 9
+  long_ema: 21
+  rsi_period: 14
+  regime_filter_period: 200  # Filtro de Regime (EMA Longa)
+
+  # --- [MELHORIA A++] FILTRO DE TENDÊNCIA ADX ---
+  # Usado para evitar mercados laterais ("chop")
+  adx_period: 14
+  # O bot só operará se o ADX estiver ACIMA deste valor (ex: 20 ou 25)
+  adx_threshold: 20
+
+# Parâmetros de Risco
+risk_params:
+  atr_period: 14
+  atr_multiplier: 2.5
+  risk_per_trade: 1.0        # (Risco base de 1%)
+  risk_reward_ratio: 0.0     # (Desativa TP Fixo, usa Trailing Stop)
+  min_balance_usdt: 50.0
+
+  # Parâmetros de Risco Dinâmico
+  rsi_conviction_threshold: 60    # (Acima de 60 (long) ou abaixo de 40 (short))
+  high_conviction_risk_mult: 1.0  # (Risco total: 1.0 * 1.0% = 1.0%)
+  low_conviction_risk_mult: 0.5   # (Meio risco: 0.5 * 1.0% = 0.5%)
+
+  # --- [MELHORIA A++] FILTRO DE TAXA DE FINANCIAMENTO ---
+  # Ignora trades LONG se a taxa de financiamento for menor (mais negativa) que este valor.
+  # Ex: -0.001 significa -0.1%. Use -1.0 para desativar.
+  max_negative_funding_rate: -0.001
