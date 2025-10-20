@@ -17,7 +17,7 @@ TIMEFRAME = 15 # Intervalo em minutos
 
 def get_bybit_session():
     # API V5 (testnet=False para dados públicos)
-    return HTTP(testnet=False)
+    return HTTP(testnet=False, recv_window=10000)
 
 def fetch_historical_data(session, symbol, timeframe, end_time_ms):
     """
@@ -108,7 +108,14 @@ def run_backfill():
 
         try:
             # Inserção em lote é muito mais rápida
-            db_session.bulk_insert_mappings(Kline, [k.__dict__ for k in klines_to_add], render_nulls=True)
+            # Usar um dicionário explícito é mais seguro do que usar __dict__
+            # que pode conter atributos internos do SQLAlchemy como '_sa_instance_state'.
+            kline_mappings = [
+                {"symbol": k.symbol, "timestamp": k.timestamp, "open": k.open,
+                 "high": k.high, "low": k.low, "close": k.close, "volume": k.volume}
+                for k in klines_to_add
+            ]
+            db_session.bulk_insert_mappings(Kline, kline_mappings)
             db_session.commit()
             total_klines_saved += len(klines_to_add)
             logging.info(f"Salvas {len(klines_to_add)} novas velas.")

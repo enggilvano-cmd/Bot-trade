@@ -106,6 +106,7 @@ class TradingEngine:
                  testnet=not self.live_mode,
                  api_key=os.getenv("BYBIT_API_KEY"),
                  api_secret=os.getenv("BYBIT_API_SECRET"),
+                 recv_window=10000  # Aumenta a janela de tempo para evitar erros de timestamp
              )
              time_res = self.rest_session.get_server_time()
              if not (time_res and time_res.get('retCode') == 0):

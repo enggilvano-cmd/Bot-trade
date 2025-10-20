@@ -8,23 +8,26 @@ from sqlalchemy import select
 
 def load_data_from_db(symbol: str):
     """Carrega os dados históricos do banco de dados."""
-    db = SessionLocal()
-    query = select(Kline).where(Kline.symbol == symbol).order_by(Kline.timestamp)
-    df = pd.read_sql(query, engine, index_col='timestamp', parse_dates=['timestamp'])
-    
-    df.rename(columns={
-        'open': 'Open',
-        'high': 'High',
-        'low': 'Low',
-        'close': 'Close',
-        'volume': 'Volume'
-    }, inplace=True)
-    
-    db.close()
-    return df
+    with SessionLocal() as db:
+        query = select(Kline).where(Kline.symbol == symbol).order_by(Kline.timestamp)
+        # pd.read_sql can use the connection from the session or the global engine
+        df = pd.read_sql(query, db.connection(), index_col='timestamp', parse_dates=['timestamp'])
+        
+        df.rename(columns={
+            'open': 'Open',
+            'high': 'High',
+            'low': 'Low',
+            'close': 'Close',
+            'volume': 'Volume'
+        }, inplace=True)
+        
+        return df
 
 class StrategyBridge(BacktestingStrategy):
     
+    # Placeholder for config passed during bt.run()
+    config: dict = {}
+
     # Parâmetros da Estratégia
     short_ema_period = 0
     long_ema_period = 0
@@ -55,8 +58,8 @@ class StrategyBridge(BacktestingStrategy):
     
     def init(self):
         # Carrega os parâmetros do config
-        strat_params = config['strategy_params']
-        risk_params = config['risk_params']
+        strat_params = self.config['strategy_params']
+        risk_params = self.config['risk_params']
         
         self.short_ema_period = self.I(lambda: strat_params['short_ema'])
         self.long_ema_period = self.I(lambda: strat_params['long_ema'])
@@ -231,9 +234,10 @@ if __name__ == "__main__":
         # 2. Configurar Backtest
         bt = Backtest(data, StrategyBridge, cash=10000, commission=.0006, trade_on_close=True) 
 
-        # 3. Executar Backtest Simples
-        stats = bt.run()
+        # 3. Executar Backtest, passando o config para a estratégia
+        print("Executando backtest...")
+        stats = bt.run(config=config)
         print(stats)
         
-        # 5. Plotar
+        # 4. Plotar
         bt.plot()

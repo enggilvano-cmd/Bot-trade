@@ -95,7 +95,10 @@ class OrderManager:
         # (Código inalterado)
         try:
             session = HTTP(
-                testnet=self.testnet, api_key=self.api_key, api_secret=self.api_secret,
+                testnet=self.testnet,
+                api_key=self.api_key,
+                api_secret=self.api_secret,
+                recv_window=10000  # Aumenta a janela de tempo para evitar erros de timestamp
             )
             time_res = session.get_server_time()
             if time_res and time_res.get('retCode') == 0:
@@ -488,7 +491,7 @@ class OrderManager:
     def run(self):
         # (Código inalterado, incluindo lógica de reconexão do PubSub)
         try:
-            self.ws_session.subscribe(["order"], callback=self._handle_order_update)
+            self.ws_session.order_stream(callback=self._handle_order_update)
             logger.info(f"OM ouvindo WebSocket V5: ['order']")
         except Exception as e_ws:
              logger.critical(f"OM falha subscribe WebSocket V5: {e_ws}. Encerrando.", exc_info=True)
