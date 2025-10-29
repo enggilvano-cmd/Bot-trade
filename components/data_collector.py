@@ -65,11 +65,18 @@ class DataCollector:
                         start_ts_ms = int(start_ts_ms_str)
                         kline_timestamp = datetime.fromtimestamp(start_ts_ms / 1000, tz=timezone.utc)
 
+                        # --- [CORREÇÃO] Passar o datetime com fuso (aware) diretamente ---
+                        # O models.py foi atualizado para DateTime(timezone=True)
                         kline_obj = Kline(
-                            symbol=self.symbol, timestamp=kline_timestamp,
-                            open=float(open_p), high=float(high_p), low=float(low_p),
-                            close=float(close_p), volume=float(volume_v)
+                            symbol=self.symbol, 
+                            timestamp=kline_timestamp, # <-- CORRIGIDO
+                            open=float(open_p), 
+                            high=float(high_p), 
+                            low=float(low_p),
+                            close=float(close_p), 
+                            volume=float(volume_v)
                         )
+                        # ---------------------------------------------------------------
 
                         saved_to_db = False
                         with SessionLocal() as db_session:
@@ -87,12 +94,13 @@ class DataCollector:
                         if saved_to_db:
                              try:
                                   candle_data = {
-                                      "symbol": self.symbol, "timestamp": kline_timestamp.isoformat(),
+                                      "symbol": self.symbol, 
+                                      "timestamp": kline_timestamp.isoformat(), # isoformat() inclui o fuso
                                       "open": float(open_p), "high": float(high_p), "low": float(low_p),
                                       "close": float(close_p), "volume": float(volume_v)
                                   }
                                   self.redis_client.publish(KLINE_CHANNEL, json.dumps(candle_data))
-                                  logger.info(f"Vela {self.symbol} {interval_v}m @ {kline_timestamp.strftime('%Y-%m-%d %H:%M:%S')} salva/publicada.")
+                                  logger.info(f"Vela {self.symbol} {interval_v}m @ {kline_timestamp.strftime('%Y-%m-%d %H:%M:%S %Z')} salva/publicada.")
                                   self.redis_client.set(f"heartbeat:{self.__class__.__name__}", int(time.time()))
                              except redis.exceptions.ConnectionError as redis_err:
                                   logger.error(f"Erro Redis (publish/heartbeat): {redis_err}")

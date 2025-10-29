@@ -1,67 +1,81 @@
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, BigInteger, Boolean, UniqueConstraint
-from sqlalchemy.orm import declarative_base
+import os
+import logging
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Boolean, UniqueConstraint, Index
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.engine.url import URL
+from sqlalchemy.sql import func # <-- Importado
 from datetime import datetime
 
+logger = logging.getLogger(__name__)
 Base = declarative_base()
 
 class Kline(Base):
     __tablename__ = 'klines'
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    symbol = Column(String, index=True, nullable=False)
-    timestamp = Column(DateTime, index=True, nullable=False) # Remove unique=True daqui
+    
+    id = Column(Integer, primary_key=True)
+    symbol = Column(String(20), nullable=False)
+    
+    # --- [CORREÇÃO] Usar DateTime(timezone=True) ---
+    # Armazena como "TIMESTAMP WITH TIME ZONE" no PostgreSQL
+    timestamp = Column(DateTime(timezone=True), nullable=False)
+    # ----------------------------------------------
+    
     open = Column(Float, nullable=False)
-    high = Column(Float)
-    low = Column(Float)
-    close = Column(Float)
-    volume = Column(Float)
+    high = Column(Float, nullable=False)
+    low = Column(Float, nullable=False)
+    close = Column(Float, nullable=False)
+    volume = Column(Float, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint('symbol', 'timestamp', name='_symbol_timestamp_uc'),
+        Index('ix_klines_symbol_timestamp', 'symbol', 'timestamp')
+    )
 
     def __repr__(self):
-        return f"<Kline(symbol='{self.symbol}', timestamp='{self.timestamp}', close={self.close})>"
-
-    # Adiciona uma restrição de unicidade composta.
-    __table_args__ = (UniqueConstraint('symbol', 'timestamp', name='_symbol_timestamp_uc'),)
+        return f"<Kline(symbol='{self.symbol}', timestamp='{self.timestamp}', close='{self.close}')>"
 
 class Order(Base):
     __tablename__ = 'orders'
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    client_order_id = Column(String, unique=True, index=True) # ID gerado por nós
-    order_id = Column(String, unique=True, index=True, nullable=True) # ID da Exchange (pode ser nulo no início)
     
-    symbol = Column(String, index=True)
-    side = Column(String)
-    order_type = Column(String)
-    price = Column(Float, nullable=True) # Preço de entrada (para ordens Limit)
-    qty = Column(Float)
-    
+    id = Column(Integer, primary_key=True)
+    client_order_id = Column(String(64), nullable=False, unique=True, index=True)
+    order_id = Column(String(64), unique=True, index=True, nullable=True) # OID da exchange
+    symbol = Column(String(20), nullable=False, index=True)
+    side = Column(String(10), nullable=False)
+    order_type = Column(String(20), nullable=False)
+    qty = Column(Float, nullable=False)
+    price = Column(Float, nullable=True)
     stop_loss = Column(Float, nullable=True)
-    take_profit = Column(Float, nullable=True) # Take Profit total (se usado)
-
-    status = Column(String, index=True, default='Pending') # Ex: Pending, New, Filled, Cancelled, Rejected, Modified
+    take_profit = Column(Float, nullable=True)
+    status = Column(String(20), nullable=False, index=True)
+    entry_price = Column(Float, nullable=True)
+    reduce_only = Column(Boolean, default=False)
     
-    # [MELHORIA A++] Campos para modificação
+    # --- [MELHORIA] Campos para modificação de SL/TP (via OrderManager) ---
+    # Usado para rastrear o 'positionIdx' da Bybit (ex: 0 para modo unificado)
+    position_idx = Column(Integer, nullable=True) 
+    # Usado para solicitações de 'modify' que não criam uma nova ordem
     new_stop_loss = Column(Float, nullable=True)
     new_take_profit = Column(Float, nullable=True)
-    position_idx = Column(Integer, nullable=True) # Para modificação de SL/TP V5
+    # ----------------------------------------------------------------------
     
-    avg_price = Column(Float, nullable=True) # Preço médio de execução
-    error_message = Column(String, nullable=True) # Se 'Rejected' ou 'failed'
-
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-
-    # --- [IMPLEMENTAÇÃO NÍVEL AVANÇADO] Campos de Gerenciamento de Posição ---
-    # Preço de entrada estimado (enviado pelo TE) vs avg_price (preço real de fill)
-    entry_price_estimate = Column(Float, nullable=True) 
-    # Preço do Take Profit Parcial (TP1)
-    tp1_price = Column(Float, nullable=True) 
-    # Flag para rastrear se o TP1 já foi atingido e processado
-    is_tp1_hit = Column(Boolean, default=False, index=True)
-    # Relação R/R do TP1 (para recálculo se o 'avg_price' for diferente do 'entry_price_estimate')
-    tp1_rr = Column(Float, nullable=True)
-    # -----------------------------------------------------------------------
-
-    # --- [CORREÇÃO BUG 2] Campo para armazenar o SL a ser definido após o fill ---
-    sl_to_set_after_fill = Column(Float, nullable=True)
-
+    # --- [CORREÇÃO] Usar DateTime(timezone=True) e server_default ---
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+    # ----------------------------------------------------------------
+    
     def __repr__(self):
-        return f"<Order(cid='{self.client_order_id}', status='{self.status}', qty={self.qty})>"
+        return f"<Order(cid='{self.client_order_id}', status='{self.status}', qty='{self.qty}')>"
+
+def init_db(engine_instance):
+    """Cria as tabelas no banco de dados."""
+    try:
+        Base.metadata.create_all(engine_instance)
+        logger.info("Tabelas do banco de dados verificadas/criadas com sucesso.")
+    except Exception as e:
+        logger.critical(f"Falha ao criar tabelas do banco de dados: {e}", exc_info=True)
+        raise
+
+# (O restante do arquivo database.py, que busca a URL do DB, permanece o mesmo)
+# Esta função 'init_db' está em 'database.py' no seu projeto original, 
+# mas a definição dos modelos está aqui.

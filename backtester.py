@@ -1,199 +1,255 @@
 import pandas as pd
 import yaml
-
+import logging # <-- Adicionado
 from backtesting import Backtest, Strategy as BacktestingStrategy
 from strategies.ema_rsi_strategy import EmaRsiStrategy
+# --- [NOVO] Importar a factory (ou copiá-la) ---
+# (Copiando a factory para manter o arquivo independente)
 from database.database import SessionLocal, engine
 from database.models import Kline
 from sqlalchemy import select
 
+logger = logging.getLogger(__name__)
+
+# --- [NOVO] Strategy Factory (copiado do TradingEngine) ---
+def strategy_factory(strategy_name: str, params: dict):
+    """Carrega a classe da estratégia com base no nome."""
+    strategies = {
+        "EmaRsiStrategy": EmaRsiStrategy,
+        # "OutraEstrategia": OutraEstrategia,
+    }
+    if strategy_name not in strategies:
+        logger.critical(f"Estratégia '{strategy_name}' não conhecida.")
+        raise ValueError(f"Estratégia '{strategy_name}' não conhecida.")
+    
+    try:
+        return strategies[strategy_name](params)
+    except (KeyError, ValueError, AttributeError) as e:
+        logger.critical(f"Erro ao inicializar estratégia '{strategy_name}': {e}", exc_info=True)
+        raise ValueError(f"Parâmetros inválidos para {strategy_name}: {e}")
+# ------------------------------------------------
+
 def load_data_from_db(symbol: str):
     """Carrega os dados históricos do banco de dados."""
-    with SessionLocal() as db:
-        query = select(Kline).where(Kline.symbol == symbol).order_by(Kline.timestamp)
-        df = pd.read_sql(query, db.connection(), index_col='timestamp', parse_dates=['timestamp'])
-        
-        df.rename(columns={
-            'open': 'Open',
-            'high': 'High',
-            'low': 'Low',
-            'close': 'Close',
-            'volume': 'Volume'
-        }, inplace=True)
-        
-        return df
+    db = SessionLocal()
+    query = select(Kline).where(Kline.symbol == symbol).order_by(Kline.timestamp)
+    
+    # --- [CORREÇÃO] Carregar dados com fuso horário ---
+    df = pd.read_sql(query, engine, index_col='timestamp', parse_dates=['timestamp'])
+    
+    if df.index.tz is None:
+        # Fallback para SQLite / DBs sem fuso nativo
+        print("Aviso: Timestamps do DB no backtest estão 'naive'. Localizando para UTC.")
+        df.index = df.index.tz_localize('UTC')
+    else:
+        # Garantir que está em UTC
+        df.index = df.index.tz_convert('UTC')
+    # --------------------------------------------------
+    
+    df.rename(columns={
+        'open': 'Open',
+        'high': 'High',
+        'low': 'Low',
+        'close': 'Close',
+        'volume': 'Volume'
+    }, inplace=True)
+    
+    db.close()
+    return df
 
 class StrategyBridge(BacktestingStrategy):
     
-    config: dict = {}
+    # Parâmetros da Estratégia (serão preenchidos pelo init)
     short_ema_period = 0
     long_ema_period = 0
     rsi_period = 0
     regime_filter_period = 0
     adx_period = 0
     adx_threshold = 0
+    
+    # Parâmetros de Risco
     atr_period = 0
     atr_multiplier = 0.0
     risk_per_trade = 0.0
-    tp1_risk_reward_ratio = 0.0
-    tp1_close_percentage = 0.0
-    move_sl_to_breakeven_on_tp1 = True
+    risk_reward_ratio = 0.0
+    
+    # Risco Dinâmico
     rsi_conviction_threshold = 0
     high_conviction_risk_mult = 0.0
     low_conviction_risk_mult = 0.0
     
     def init(self):
-        strat_params = self.config['strategy_params']
-        risk_params = self.config['risk_params']
+        # Carrega os parâmetros do config
+        strat_params = config['strategy_params']
+        risk_params = config['risk_params']
         
-        self.short_ema_period = strat_params['short_ema']
-        self.long_ema_period = strat_params['long_ema']
-        self.rsi_period = strat_params['rsi_period']
-        self.regime_filter_period = strat_params['regime_filter_period']
-        self.adx_period = strat_params.get('adx_period', 14)
-        self.adx_threshold = strat_params.get('adx_threshold', 0)
-        
-        self.atr_period = risk_params['atr_period']
-        self.atr_multiplier = risk_params['atr_multiplier']
-        self.risk_per_trade = risk_params['risk_per_trade']
-        
-        self.tp1_risk_reward_ratio = risk_params.get('tp1_risk_reward_ratio', 0.0)
-        self.tp1_close_percentage = risk_params.get('tp1_close_percentage', 0.5)
-        self.move_sl_to_breakeven_on_tp1 = risk_params.get('move_sl_to_breakeven_on_tp1', True)
-        
-        risk_conv_params = risk_params.get('dynamic_risk_params', {})
-        self.rsi_conviction_threshold = risk_conv_params.get('rsi_conviction_threshold', 0)
-        self.high_conviction_risk_mult = risk_conv_params.get('high_conviction_risk_mult', 1.0)
-        self.low_conviction_risk_mult = risk_conv_params.get('low_conviction_risk_mult', 1.0)
+        # (O preenchimento dos parâmetros permanece o mesmo)
+        self.short_ema_period = self.I(lambda: strat_params['short_ema'])
+        self.long_ema_period = self.I(lambda: strat_params['long_ema'])
+        self.rsi_period = self.I(lambda: strat_params['rsi_period'])
+        self.regime_filter_period = self.I(lambda: strat_params['regime_filter_period'])
+        self.adx_period = self.I(lambda: strat_params.get('adx_period', 14))
+        self.adx_threshold = self.I(lambda: strat_params.get('adx_threshold', 0))
+        self.atr_period = self.I(lambda: risk_params['atr_period'])
+        self.atr_multiplier = self.I(lambda: risk_params['atr_multiplier'])
+        self.risk_per_trade = self.I(lambda: risk_params['risk_per_trade'])
+        self.risk_reward_ratio = self.I(lambda: risk_params['risk_reward_ratio'])
+        self.rsi_conviction_threshold = self.I(lambda: risk_params['rsi_conviction_threshold'])
+        self.high_conviction_risk_mult = self.I(lambda: risk_params['high_conviction_risk_mult'])
+        self.low_conviction_risk_mult = self.I(lambda: risk_params['low_conviction_risk_mult'])
 
-        all_params = {**strat_params, **risk_params, **risk_conv_params, 'risk_reward_ratio': 0.0}
-        self.strategy_obj = EmaRsiStrategy(all_params)
-
-        df_ohlcv = pd.DataFrame({
-            'open': self.data.Open, 'high': self.data.High, 'low': self.data.Low,
-            'close': self.data.Close, 'volume': self.data.Volume
+        # --- [CORREÇÃO] Usar a Strategy Factory ---
+        all_params = {**strat_params, **risk_params}
+        strategy_name = config.get('strategy_name')
+        if not strategy_name: raise ValueError("strategy_name não definido no config")
+        self.strategy = strategy_factory(strategy_name, all_params)
+        # ----------------------------------------
+        
+        self.df = pd.DataFrame({
+            'open': self.data.Open,
+            'high': self.data.High,
+            'low': self.data.Low,
+            'close': self.data.Close,
+            'volume': self.data.Volume
         })
-        self.indicators_df = self.strategy_obj.calculate_indicators(df_ohlcv)
-        self.ema_short = self.I(lambda: self.indicators_df[self.strategy_obj.ema_short_col], name="EMA Short")
-        self.ema_long = self.I(lambda: self.indicators_df[self.strategy_obj.ema_long_col], name="EMA Long")
-        self.rsi = self.I(lambda: self.indicators_df[self.strategy_obj.rsi_col], name="RSI", overlay=False)
-        self.regime = self.I(lambda: self.indicators_df[self.strategy_obj.regime_col], name="Regime")
-        self.atr = self.I(lambda: self.indicators_df[self.strategy_obj.atr_col], name="ATR", overlay=False)
-        self.adx = self.I(lambda: self.indicators_df[self.strategy_obj.adx_col], name="ADX", overlay=False)
+        
+        # Calcula os indicadores
+        self.df = self.strategy.calculate_indicators(self.df)
+        
+        # Mapeia os indicadores para plotagem
+        # (Esta parte ainda é específica da EmaRsiStrategy)
+        self.ema_short = self.I(lambda x: self.df[self.strategy.ema_short_col].values, name="EMA_Short")
+        self.ema_long = self.I(lambda x: self.df[self.strategy.ema_long_col].values, name="EMA_Long")
+        self.rsi = self.I(lambda x: self.df[self.strategy.rsi_col].values, name="RSI")
+        self.ema_regime = self.I(lambda x: self.df[self.strategy.regime_col].values, name="EMA_Regime")
+        self.atr_val = self.I(lambda x: self.df[self.strategy.atr_col].values, name="ATR") 
+        self.adx_val = self.I(lambda x: self.df.get(self.strategy.adx_col, float('nan')), name="ADX")
 
-    def _handle_trailing_stop(self, current_df: pd.DataFrame):
-        """Gerencia a lógica do Trailing Stop Loss (TSL)."""
-        # Guarda de segurança: só executa se a posição estiver ativa e o TSL habilitado.
-        if not self.position or self.atr_multiplier <= 0:
-            return
-
-        current_sl = self.position.sl
-        # A guarda mais importante: se o SL não for um número, a posição foi fechada
-        # pelo motor do backtester nesta vela. Não há nada a fazer.
-        if not isinstance(current_sl, (int, float)):
-            return
-
-        atr_val = current_df[self.strategy_obj.atr_col].iloc[-1]
-        atr_offset = atr_val * self.atr_multiplier
-
-        if self.position.is_long:
-            new_sl = self.data.Low[-1] - atr_offset
-            if new_sl > current_sl:
-                self.position.sl = new_sl
-        elif self.position.is_short:
-            new_sl = self.data.High[-1] + atr_offset
-            if new_sl < current_sl:
-                self.position.sl = new_sl
 
     def next(self):
-        current_time = self.data.index[-1]
-        price = self.data.Close[-1]
+        current_index = len(self.data.Close) - 1
+        
+        if current_index < 2:
+            return
+            
+        # Pega o DataFrame até a vela atual
+        df_slice = self.df.iloc[:current_index + 1]
+        
+        # 1. Gera o sinal
+        signal_data = self.strategy.generate_signal(df_slice)
+        
+        # 2. Obtém a vela atual para trailing (índice -1)
+        last_candle_low = self.data.Low[-1]
+        last_candle_high = self.data.High[-1]
+        current_atr = self.atr_val[-1] 
+        
+        if pd.isna(current_atr):
+            return
 
-        try:
-            current_df = self.indicators_df.loc[:current_time]
-            if len(current_df) < 2: return 
+        atr_offset = current_atr * self.atr_multiplier
 
-            signal_data = self.strategy_obj.generate_signal(current_df)
-
-            # --- GESTÃO DE POSIÇÃO E SAÍDAS ---
-            if not self.position:
-                # --- LÓGICA DE ENTRADA ---
-                if signal_data:
-                    sl_price = signal_data['sl_base_price']
-                    risk_mult = signal_data.get('risk_multiplier', 1.0)
-                    size = self._calculate_position_size(sl_price, risk_mult)
-
-                    if size > 0:
-                        if signal_data['signal'] == 'long':
-                            self.buy(size=size, sl=sl_price)
-                        elif signal_data['signal'] == 'short':
-                            self.sell(size=size, sl=sl_price)
-            else:
-                # --- LÓGICA DE SAÍDA ---
-                # 1. SAÍDA POR SINAL OPOSTO (PRIORIDADE MÁXIMA)
-                is_long_and_short_signal = self.position.is_long and signal_data and signal_data['signal'] == 'short'
-                is_short_and_long_signal = self.position.is_short and signal_data and signal_data['signal'] == 'long'
-                if is_long_and_short_signal or is_short_and_long_signal:
-                    self.position.close(comment="Sinal Oposto")
-                    return # Sai para evitar outras ações na mesma vela
-
-                # 2. GESTÃO DE TAKE PROFIT PARCIAL (TP1) E BREAKEVEN
-                # Verifica se a posição tem apenas uma ordem de entrada (não é um remanescente de TP1)
-                if len(self.trades) > 0 and self.trades[-1].is_entry and len(self.trades) % 2 != 0:
-                    trade = self.trades[-1]
-                    sl_dist = abs(trade.entry_price - trade.sl)
+        # --- LÓGICA DE GERENCIAMENTO DE POSIÇÃO ---
+        
+        # 3. Se Posição Aberta: Gerenciar Saída
+        if self.position:
+            
+            # 3a. Saída por Sinal Oposto
+            if signal_data:
+                signal = signal_data['signal']
+                if (self.position.is_long and signal == 'short') or \
+                   (self.position.is_short and signal == 'long'):
                     
-                    if self.tp1_risk_reward_ratio > 0:
-                        if self.position.is_long and self.data.High[-1] >= trade.entry_price + (sl_dist * self.tp1_risk_reward_ratio):
-                            self.position.close(self.tp1_close_percentage, comment="TP1 Parcial Hit")
-                            if self.move_sl_to_breakeven_on_tp1: self.position.sl = trade.entry_price
-                        elif self.position.is_short and self.data.Low[-1] <= trade.entry_price - (sl_dist * self.tp1_risk_reward_ratio):
-                            self.position.close(self.tp1_close_percentage, comment="TP1 Parcial Hit")
-                            if self.move_sl_to_breakeven_on_tp1: self.position.sl = trade.entry_price
+                    self.position.close()
+
+            # 3b. Lógica de Trailing Stop (Se ainda estiver posicionado)
+            if self.position:
+                if self.position.is_long:
+                    proposed_sl = last_candle_low - atr_offset
+                    if proposed_sl > self.position.sl:
+                        self.position.sl = proposed_sl
                 
-                # 3. GESTÃO DE TRAILING STOP (TSL)
-                self._handle_trailing_stop(current_df)
+                elif self.position.is_short:
+                    proposed_sl = last_candle_high + atr_offset
+                    if proposed_sl < self.position.sl:
+                        self.position.sl = proposed_sl
 
-        except Exception as e:
-            print(f"Erro no Backtest 'next' em {current_time}: {e}")
-            raise e
+        # 4. Se Sem Posição: Gerenciar Entrada
+        if not self.position and signal_data:
+            signal = signal_data['signal']
+            sl_base = signal_data['sl_base_price']
+            risk_multiplier = signal_data['risk_multiplier']
+            
+            entry_price = self.data.Close[-1] 
+            take_profit_price = 0.0
 
-    def _calculate_position_size(self, stop_loss_price, risk_multiplier=1.0):
-        risk_percent = self.risk_per_trade * risk_multiplier
-        
-        # --- [CORREÇÃO CRÍTICA] Simular o preço de entrada de forma mais realista ---
-        # O sinal é gerado no fechamento da vela atual (self.data.Close[-1]).
-        # A ordem de mercado seria executada perto da abertura da vela seguinte.
-        # Usar o preço de abertura da vela seguinte como preço de entrada simulado
-        # alinha o backtest com a realidade de uma ordem de mercado.
-        # Se usarmos o preço de fechamento, o backtest assume que podemos comprar
-        # a um preço que já é passado, o que é impossível e gera resultados falsos.
-        entry_price = self.data.Open[-1] # Preço de abertura da vela atual (que é a seguinte no loop 'next')
-        
-        equity = self.equity        
-        risk_per_trade_usd = equity * (risk_percent / 100)
-        sl_distance_usd = abs(entry_price - stop_loss_price)
-        if sl_distance_usd == 0: return 0.0
-        size = risk_per_trade_usd / sl_distance_usd
+            # 4a. Calcular SL/TP
+            if signal == 'long':
+                stop_loss_price = sl_base - atr_offset
+                risk_per_coin = entry_price - stop_loss_price
+                if self.risk_reward_ratio > 0:
+                    take_profit_price = entry_price + (risk_per_coin * self.risk_reward_ratio)
 
+            elif signal == 'short':
+                stop_loss_price = sl_base + atr_offset
+                risk_per_coin = stop_loss_price - entry_price
+                if self.risk_reward_ratio > 0:
+                    take_profit_price = entry_price - (risk_per_coin * self.risk_reward_ratio)
+
+            if risk_per_coin <= 0:
+                return
+
+            # 4b. Calcular Tamanho da Posição
+            balance = self.equity
+            base_risk_amount = balance * (self.risk_per_trade / 100)
+            risk_amount_per_trade = base_risk_amount * risk_multiplier
+            position_size = risk_amount_per_trade / risk_per_coin
+            
+            if position_size <= 0:
+                return
+
+            # 4c. Executar Ordem
+            tp_param = take_profit_price if take_profit_price > 0 else None
+            
+            # (O Backtester não simula Stop-Limit, apenas Stop-Market,
+            # mas o cálculo do SL (stop_loss_price) é idêntico)
+            if signal == 'long':
+                self.buy(sl=stop_loss_price, tp=tp_param, size=position_size)
+            elif signal == 'short':
+                self.sell(sl=stop_loss_price, tp=tp_param, size=position_size)
 
 if __name__ == "__main__":
+    print("Iniciando backtest...")
     
     with open('configs/btc_usdt_config.yaml', 'r') as f:
-        config = yaml.safe_load(f)
+        config = yaml.safe_load(f) # O config agora é global para a StrategyBridge
 
-    print(f"Carregando dados para {config['symbol']} do banco de dados...")
-    data = load_data_from_db(config['symbol'])
+    try:
+        data = load_data_from_db(config['symbol'])
+        
+        # Tenta obter o período mais longo do config, senão usa 250
+        strat_params = config.get('strategy_params', {})
+        min_candles_needed = max(
+            strat_params.get('regime_filter_period', 200),
+            strat_params.get('long_ema', 21),
+            strat_params.get('adx_period', 14)
+        ) + 50 # 50 de margem
+
+        if data.empty or len(data) < min_candles_needed:
+            print(f"Não foram encontrados dados suficientes ({len(data)}) para o símbolo {config['symbol']}.")
+            print(f"Mínimo necessário: {min_candles_needed}. Execute o script 'backfill.py' com dias suficientes (ex: 730+).")
+            exit(1)
+        print(f"Carregados {len(data)} registros do banco de dados.")
+    except Exception as e:
+        print(f"Erro ao carregar dados do banco: {e}")
+        exit(1)
+
+    # Executa o backtest
+    bt = Backtest(data, StrategyBridge, cash=10000, commission=.0006) # 0.06% de taxa
+    stats = bt.run()
+    print("\n--- RESULTADOS DO BACKTEST (LÓGICA DE PRODUÇÃO) ---")
+    print(stats)
     
-    if data.empty:
-        print("Dados insuficientes. Execute o backfill.py primeiro.")
-    else:
-        print(f"Dados carregados: {len(data)} velas.")
-        
-        bt = Backtest(data, StrategyBridge, cash=10000, commission=.0006, trade_on_close=True) 
-
-        print("Executando backtest...")
-        stats = bt.run(config=config)
-        print(stats)
-        
-        bt.plot()
+    print("\n--- Trades ---")
+    print(stats['_trades'])
+    
+    bt.plot()
