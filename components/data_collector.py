@@ -66,7 +66,7 @@ class DataCollector:
                         kline_timestamp = datetime.fromtimestamp(start_ts_ms / 1000, tz=timezone.utc)
 
                         kline_obj = Kline(
-                            symbol=self.symbol, timestamp=kline_timestamp.replace(tzinfo=None),
+                            symbol=self.symbol, timestamp=kline_timestamp,
                             open=float(open_p), high=float(high_p), low=float(low_p),
                             close=float(close_p), volume=float(volume_v)
                         )

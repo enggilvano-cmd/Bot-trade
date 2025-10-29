@@ -1,26 +1,52 @@
-# Usa uma imagem Python leve (3.12 para compatibilidade com pandas-ta)
-FROM python:3.12-slim
+# -----------------------------------------------------------------
+# Estágio 1: "Builder" - Usa a imagem completa para compilar dependências
+# -----------------------------------------------------------------
+FROM python:3.10 AS builder
 
-# Define o diretório de trabalho
-WORKDIR /app
-
-# Instala dependências do sistema (necessárias para psycopg2, etc.)
+# Instala dependências do sistema necessárias para COMPILAR pacotes Python
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    libpq-dev \
+    libpq5 \
     && rm -rf /var/lib/apt/lists/*
 
-# Copia e instala as dependências Python
+# Cria um ambiente virtual que será copiado para a imagem final
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Atualiza o pip para a versão mais recente para garantir o melhor resolvedor de dependências e evitar bugs.
+RUN pip install --upgrade pip
+
+# Copia o arquivo de dependências primeiro para aproveitar o cache do Docker
 COPY requirements.txt .
-
-RUN pip install --no-cache-dir --upgrade pip
-
-# Instala todas as dependências do requirements.txt em um único passo
+# Instala as dependências de forma limpa e direta.
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copia todo o código do projeto para o container
-COPY . .
+# -----------------------------------------------------------------
+# Estágio 2: "Final" - Usa a imagem slim para a execução
+# -----------------------------------------------------------------
+FROM python:3.10-slim
 
-# Define o comando padrão para rodar a aplicação.
-# O entrypoint.sh não é mais necessário para sincronização de tempo.
-CMD ["python", "-u", "main.py"]
+# Instala apenas as dependências de sistema MÍNIMAS para a EXECUÇÃO
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ntpsec-ntpdate \
+    libpq5 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copia o ambiente virtual já pronto do estágio "builder"
+COPY --from=builder /opt/venv /opt/venv
+
+# Configura o PATH para usar o Python e os pacotes do nosso venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Cria e define o diretório da aplicação
+WORKDIR /app
+
+# Copia o código da aplicação (incluindo o entrypoint.sh)
+COPY . .
+RUN sed -i 's/\r$//' /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
+
+# Define o entrypoint
+ENTRYPOINT ["/app/entrypoint.sh"]
+
+# Altere "main.py" se o seu arquivo principal tiver outro nome
+CMD ["python", "main.py"]

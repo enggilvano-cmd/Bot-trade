@@ -1,0 +1,25 @@
+# Arquivos do Git
+.git
+.gitignore
+.gitattributes
+
+# Arquivos de configuração do Docker
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Credenciais e ambientes
+.env
+*.env
+.env.*
+
+# Ambientes virtuais e caches do Python
+venv
+.venv
+__pycache__
+*.pyc
+*.pyo
+
+# Configurações de IDE
+.vscode
+.idea

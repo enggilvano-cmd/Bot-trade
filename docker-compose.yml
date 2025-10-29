@@ -1,41 +1,53 @@
+
 services:
-  trading-system:
-    build: .
-    container_name: trading_system_app
-    restart: always
-    volumes:
-      # Monta as configurações para que possam ser alteradas sem reconstruir a imagem
-      - ./configs:/app/configs
-      - /etc/timezone:/etc/timezone:ro
-      - /etc/localtime:/etc/localtime:ro
-    env_file:
-      - .env
-    environment: # Usa substituição de variáveis do .env
-      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
-      # Adiciona a variável de ambiente TZ para garantir o fuso horário correto.
-      - TZ=America/Sao_Paulo # Ou o seu fuso horário, ex: "Europe/Lisbon", "UTC"
-    # Adiciona dependência do Redis e do DB
-    depends_on:
-      - db
-      - redis
-
-  # Serviço Redis
-  redis:
-    image: redis:7-alpine
-    container_name: trading_redis
-    restart: always
-    volumes:
-      - redis_data:/data
-
-  # Serviço de banco de dados (Postgres)
-  db:
-    image: postgres:15
-    container_name: trading_db
-    restart: always
-    env_file: # Também usa o .env para consistência
-      - .env
+  postgres:
+    image: postgres:14-alpine
+    container_name: trading-system-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - trading-net
+
+  redis:
+    image: redis:7-alpine
+    container_name: trading-system-redis
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - trading-net
+
+  app:
+    build: .
+    container_name: trading-system-app
+    restart: unless-stopped
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - trading-net
+
+networks:
+  trading-net:
+    driver: bridge
+
 volumes:
   postgres_data:
-  redis_data:
+    driver: local

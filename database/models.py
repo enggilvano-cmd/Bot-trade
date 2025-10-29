@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, BigInteger, Boolean
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, BigInteger, Boolean, UniqueConstraint
 from sqlalchemy.orm import declarative_base
 from datetime import datetime
 
@@ -6,10 +6,10 @@ Base = declarative_base()
 
 class Kline(Base):
     __tablename__ = 'klines'
-    id = Column(Integer, primary_key=True)
-    symbol = Column(String, index=True)
-    timestamp = Column(DateTime, unique=True, index=True) # Torna o timestamp único para evitar duplicatas
-    open = Column(Float)
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    symbol = Column(String, index=True, nullable=False)
+    timestamp = Column(DateTime, index=True, nullable=False) # Remove unique=True daqui
+    open = Column(Float, nullable=False)
     high = Column(Float)
     low = Column(Float)
     close = Column(Float)
@@ -17,6 +17,9 @@ class Kline(Base):
 
     def __repr__(self):
         return f"<Kline(symbol='{self.symbol}', timestamp='{self.timestamp}', close={self.close})>"
+
+    # Adiciona uma restrição de unicidade composta.
+    __table_args__ = (UniqueConstraint('symbol', 'timestamp', name='_symbol_timestamp_uc'),)
 
 class Order(Base):
     __tablename__ = 'orders'
@@ -56,6 +59,9 @@ class Order(Base):
     # Relação R/R do TP1 (para recálculo se o 'avg_price' for diferente do 'entry_price_estimate')
     tp1_rr = Column(Float, nullable=True)
     # -----------------------------------------------------------------------
+
+    # --- [CORREÇÃO BUG 2] Campo para armazenar o SL a ser definido após o fill ---
+    sl_to_set_after_fill = Column(Float, nullable=True)
 
     def __repr__(self):
         return f"<Order(cid='{self.client_order_id}', status='{self.status}', qty={self.qty})>"

@@ -1,0 +1,2 @@
+# Força o Git a usar terminações de linha Linux (LF) para scripts shell
+*.sh    eol=lf

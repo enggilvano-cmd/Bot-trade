@@ -35,6 +35,9 @@ risk_params:
   atr_multiplier: 1.0
   risk_per_trade: 2.0  # Risco em % da carteira (ex: 2.0 para 2%)
   min_balance_usdt: 100 # Saldo mínimo para operar
+  # --- [MELHORIA A++] Limite de Risco por Trade ---
+  # Risco máximo em % do saldo total que pode ser alocado em um único trade.
+  max_balance_risk_cap_per_trade: 5.0 # Ex: 5.0 para 5%
   
   # --- [IMPLEMENTAÇÃO NÍVEL AVANÇADO] Fechamento Parcial (TP1) ---
   # Se > 0, define um Take Profit parcial (TP1) baseado no Risco/Retorno

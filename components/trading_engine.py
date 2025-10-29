@@ -13,18 +13,26 @@ from strategies.ema_rsi_strategy import EmaRsiStrategy
 from components.telegram_alerter import TelegramAlerter
 from pybit.unified_trading import HTTP
 from pybit.exceptions import InvalidRequestError, FailedRequestError 
+from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type
+
 
 logger = logging.getLogger(__name__)
 KLINE_CHANNEL = f"klines:{os.getenv('SYMBOL', 'BTCUSDT')}"
 NEW_ORDER_CHANNEL = "orders:new"
 MODIFY_ORDER_CHANNEL = "orders:modify"
-CLOSE_ORDER_CHANNEL = "orders:close"
 ORDER_UPDATE_CHANNEL = "orders:update"
+
+# Política de retry para chamadas de API do TradingEngine
+TE_RETRY_POLICY = {
+    "wait": wait_exponential(multiplier=1, min=1, max=10),
+    "stop": stop_after_attempt(3),
+    "retry": retry_if_exception_type((InvalidRequestError, FailedRequestError)), # Retry em erros de rede/API
+}
 
 # Constantes de precisão
 PRICE_PRECISION = 2 
 QTY_PRECISION = 3   
-MIN_ORDER_QTY = 0.001
+MIN_ORDER_QTY = 0.001 # Quantidade mínima de ordem para o símbolo
 
 # Timeout para ordens pendentes
 PENDING_ORDER_TIMEOUT = 120 # 2 minutos
@@ -74,6 +82,7 @@ class TradingEngine:
         self.max_neg_funding = risk_cfg.get('max_negative_funding_rate', -1.0)
         self.min_balance = risk_cfg.get('min_balance_usdt', 0)
         self.risk_per_trade = risk_cfg.get('risk_per_trade', 0)
+        self.max_balance_risk_cap_per_trade = risk_cfg.get('max_balance_risk_cap_per_trade', 5.0) / 100 # Convert to decimal
         # ------------------------------------------------
 
         # Lock de ordem e estado da posição
@@ -175,89 +184,6 @@ class TradingEngine:
 
 
     # --- API Calls V5 (Código inalterado) ---
-    def _get_wallet_balance(self, coin="USDT"):
-        try:
-            balance_info = self.rest_session.get_wallet_balance(accountType="CONTRACT")
-            if balance_info and balance_info.get('retCode') == 0:
-                 lst = balance_info.get('result', {}).get('list', [])
-                 if lst:
-                     for item in lst:
-                         if item.get('coin') == coin:
-                             bal = item.get('equity')
-                             if bal:
-                                 return float(bal)
-            logger.error(f"Erro/formato saldo V5: {balance_info}")
-            return 0.0
-        except InvalidRequestError as api_err:
-             logger.error(f"Erro API V5 (Saldo): {api_err.status_code}-{api_err.message}")
-             self.alerter.send_message(f"🚨 Erro API Bybit (Saldo): {api_err.status_code}-{api_err.message}")
-             return 0.0
-        except Exception as e:
-             logger.error(f"Erro geral saldo V5: {e}", exc_info=True)
-             return 0.0
-
-    def _get_live_price(self):
-        try:
-            ticker = self.rest_session.get_tickers(category="linear", symbol=self.symbol)
-            if ticker and ticker.get('retCode') == 0:
-                 lst = ticker.get('result', {}).get('list', [])
-                 if lst:
-                     price = lst[0].get('lastPrice')
-                     if price:
-                         return float(price)
-            logger.warning(f"Erro/formato ticker V5: {ticker}")
-            return None
-        except InvalidRequestError as api_err:
-             logger.error(f"Erro API V5 (Ticker): {api_err.status_code}-{api_err.message}")
-             return None
-        except Exception as e:
-             logger.error(f"Erro geral preço V5: {e}. Usando 'close'.", exc_info=True)
-             return None
-
-    def _get_current_position(self):
-        try:
-            pos = self.rest_session.get_positions(category="linear", symbol=self.symbol)
-            if pos and pos.get('retCode') == 0:
-                lst = pos.get('result', {}).get('list', [])
-                if lst:
-                    for p in lst:
-                        size = p.get('size', "0")
-                        if size and float(size) > 0:
-                            avg_px = p.get('avgPrice', "0");
-                            sl = p.get('stopLoss', "0");
-                            tp = p.get('takeProfit', "0")
-                            return (float(size), p.get('side'),
-                                    float(avg_px) if avg_px else 0.0,
-                                    int(p.get('positionIdx', 0)),
-                                    float(sl) if sl else 0.0,
-                                    float(tp) if tp else 0.0)
-            return 0.0, None, 0.0, 0, 0.0, 0.0
-        except InvalidRequestError as api_err:
-             logger.error(f"Erro API V5 (Posições): {api_err.status_code}-{api_err.message}")
-             self.alerter.send_message(f"🚨 Erro API Bybit (Posições): {api_err.status_code}-{api_err.message}")
-             return 0.0, None, 0.0, 0, 0.0, 0.0
-        except Exception as e:
-            if "Retryable error occurred" in str(e):
-                 logger.warning(f"Erro de API retentável ao buscar posições: {e}")
-                 return 0.0, None, 0.0, 0, 0.0, 0.0
-            logger.error(f"Erro geral posição V5: {e}", exc_info=True)
-            return 0.0, None, 0.0, 0, 0.0, 0.0
-            
-    def _get_funding_rate(self):
-        try:
-             ticker = self.rest_session.get_tickers(category="linear", symbol=self.symbol)
-             if ticker and ticker.get('retCode') == 0:
-                 lst = ticker.get('result', {}).get('list', [])
-                 if lst:
-                     fr = lst[0].get('fundingRate')
-                     if fr:
-                         return float(fr)
-             logger.warning(f"Erro/formato funding V5: {ticker}")
-             return 0.0 
-        except Exception as e:
-             logger.error(f"Erro geral funding V5: {e}", exc_info=True)
-             return 0.0
-
 
     def _sync_position_on_startup(self):
         """
@@ -266,7 +192,7 @@ class TradingEngine:
         try:
             logger.info("Sincronizando posição V5 e estado do DB...")
             pos_size, pos_side, entry_px, pos_idx, cur_sl, cur_tp = self._get_current_position()
-            
+
             if pos_size > 0:
                 # --- [NÍVEL AVANÇADO] Sincronizar estado do DB ---
                 order_cid_in_db = None
@@ -300,7 +226,7 @@ class TradingEngine:
                 entry_fmt = f"{entry_px:.{PRICE_PRECISION}f}"
                 sl_fmt = f"{cur_sl:.{PRICE_PRECISION}f}" if cur_sl else "N/A"
                 tp_fmt = f"{cur_tp:.{PRICE_PRECISION}f}" if cur_tp else "N/A"
-                
+
                 msg = (f"⚠️ POSIÇÃO V5 EXISTENTE!\nLado: {pos_side}, Qtd: {pos_size}\n"
                        f"Entrada: {entry_fmt}, SL: {sl_fmt}, TP: {tp_fmt}\n"
                        f"CID DB: {order_cid_in_db or 'N/A'}\nAssumindo gerenciamento.")
@@ -310,10 +236,94 @@ class TradingEngine:
                 logger.info("Nenhuma posição V5 aberta. Resetando estado.")
                 self.active_order_cid = None
                 self.active_position_details = {}
-                
+
         except Exception as e:
              logger.error(f"Falha CRÍTICA sync posição V5: {e}", exc_info=True)
              self.alerter.send_message("🚨 Falha CRÍTICA sync posição V5!")
+
+    @retry(**TE_RETRY_POLICY)
+    def _get_wallet_balance(self, coin="USDT"):
+        try:
+            balance_info = self.rest_session.get_wallet_balance(accountType="CONTRACT")
+            if balance_info and balance_info.get('retCode') == 0:
+                 lst = balance_info.get('result', {}).get('list', [])
+                 if lst:
+                     for item in lst:
+                         if item.get('coin') == coin:
+                             bal = item.get('equity')
+                             if bal:
+                                 return float(bal)
+            logger.error(f"Erro/formato saldo V5: {balance_info}")
+            return 0.0
+        except InvalidRequestError as api_err:
+             logger.error(f"Erro API V5 (Saldo): {api_err.status_code}-{api_err.message}")
+             self.alerter.send_message(f"🚨 Erro API Bybit (Saldo): {api_err.status_code}-{api_err.message}")
+             return 0.0
+        except Exception as e:
+            logger.error(f"Erro geral saldo V5: {e}", exc_info=True)
+            return 0.0
+
+    @retry(**TE_RETRY_POLICY)
+    def _get_live_price(self):
+        try:
+                ticker = self.rest_session.get_tickers(category="linear", symbol=self.symbol)
+                if ticker and ticker.get('retCode') == 0:
+                     lst = ticker.get('result', {}).get('list', [])
+                     if lst:
+                         price = lst[0].get('lastPrice')
+                         if price:
+                             return float(price)
+                logger.warning(f"Erro/formato ticker V5: {ticker}")
+                return None
+        except InvalidRequestError as api_err:
+             logger.error(f"Erro API V5 (Ticker): {api_err.status_code}-{api_err.message}")
+             return None
+        except Exception as e:
+            logger.error(f"Erro geral preço V5: {e}. Usando 'close'.", exc_info=True)
+            return None
+
+    @retry(**TE_RETRY_POLICY)
+    def _get_current_position(self):
+        try:
+                pos = self.rest_session.get_positions(category="linear", symbol=self.symbol)
+                if pos and pos.get('retCode') == 0:
+                    lst = pos.get('result', {}).get('list', [])
+                    if lst:
+                        for p in lst:
+                            size = p.get('size', "0")
+                            if size and float(size) > 0:
+                                avg_px = p.get('avgPrice', "0");
+                                sl = p.get('stopLoss', "0");
+                                tp = p.get('takeProfit', "0")
+                                return (float(size), p.get('side'),
+                                        float(avg_px) if avg_px else 0.0,
+                                        int(p.get('positionIdx', 0)),
+                                        float(sl) if sl else 0.0,
+                                        float(tp) if tp else 0.0)
+                return 0.0, None, 0.0, 0, 0.0, 0.0
+        except InvalidRequestError as api_err:
+             logger.error(f"Erro API V5 (Posições): {api_err.status_code}-{api_err.message}")
+             self.alerter.send_message(f"🚨 Erro API Bybit (Posições): {api_err.status_code}-{api_err.message}")
+             return 0.0, None, 0.0, 0, 0.0, 0.0
+        except Exception as e: # Catch all other exceptions
+            logger.error(f"Erro geral posição V5: {e}", exc_info=True)
+            return 0.0, None, 0.0, 0, 0.0, 0.0
+
+    @retry(**TE_RETRY_POLICY)
+    def _get_funding_rate(self):
+        try:
+                 ticker = self.rest_session.get_tickers(category="linear", symbol=self.symbol)
+                 if ticker and ticker.get('retCode') == 0:
+                     lst = ticker.get('result', {}).get('list', [])
+                     if lst:
+                         fr = lst[0].get('fundingRate')
+                         if fr:
+                             return float(fr)
+                 logger.warning(f"Erro/formato funding V5: {ticker}")
+                 return 0.0
+        except Exception as e:
+            logger.error(f"Erro geral funding V5: {e}", exc_info=True)
+            return 0.0
 
 
     # --- Position Sizing ---
@@ -328,7 +338,7 @@ class TradingEngine:
         risk_percent = self.risk_per_trade / 100
         
         base_risk = balance * risk_percent
-        risk_amount = min(base_risk * risk_multiplier, balance * 0.95) 
+        risk_amount = min(base_risk * risk_multiplier, balance * self.max_balance_risk_cap_per_trade) # Limita o risco total
         
         logger.info(f"Calc Size: Saldo={balance:.2f}, RiscoFinal={risk_amount:.2f}")
 
@@ -406,7 +416,7 @@ class TradingEngine:
             data = {
                 "client_order_id": cid, "symbol": self.symbol, "side": side,
                 "order_type": "Market", "qty": qty, "price": None,
-                "stop_loss": stop_loss_price,
+                "stop_loss": None, # BUG 2 FIX: Não enviar SL na abertura
                 
                 # --- [NÍVEL AVANÇADO] Enviar dados de estado para o OM ---
                 "take_profit": None, # Não enviar TP para a exchange
@@ -415,6 +425,8 @@ class TradingEngine:
                 "tp1_rr": self.tp1_rr if self.tp1_rr > 0 else None
                 # ---------------------------------------------------
             }
+            # Armazenar o SL que queremos definir após a confirmação
+            data['sl_to_set_after_fill'] = stop_loss_price
             self.redis_client.publish(NEW_ORDER_CHANNEL, json.dumps(data))
             
             sl_fmt = f"{stop_loss_price:.{PRICE_PRECISION}f}"
@@ -542,12 +554,41 @@ class TradingEngine:
                     self.alerter.send_message(f"🎉 ORDEM {cid} EXECUTADA. Preço: {data.get('avg_price'):.{PRICE_PRECISION}f}")
                     self.pending_order = None # Desbloquear
 
+                    # --- [CORREÇÃO BUG 2] Definir SL após a confirmação de fill ---
+                    pos_idx = data.get("pos_idx", 0)
+                    sl_to_set = data.get("sl_to_set_after_fill")
+                    if sl_to_set and pos_idx is not None:
+                        logger.info(f"Fill de abertura confirmado. Definindo SL={sl_to_set} para posIdx={pos_idx}")
+                        # Usar o mesmo TP que seria usado (geralmente 0/None)
+                        mod_cid = self._publish_modify_order(pos_idx, sl_to_set, 0.0)
+                        if mod_cid:
+                            self.pending_order = {
+                                "cid": mod_cid,
+                                "timestamp": time.time(), # Reinicia o timer do deadlock
+                                "action": "set_sl_after_open",
+                                "original_open_cid": cid # Referência para a ordem de abertura
+                            }
+                        else:
+                            # CRÍTICO: Se falhar ao definir SL, a posição está desprotegida.
+                            # Considerar fechar a posição imediatamente ou alertar agressivamente.
+                            logger.critical(f"FALHA CRÍTICA ao publicar MODIFICAÇÃO de SL para {cid}. Posição pode estar sem SL! "
+                                            f"ALERTA: Considere fechar a posição manualmente ou implementar fechamento automático de emergência.")
+                            self.alerter.send_message(f"🚨 CRÍTICO: Falha ao definir SL para ordem {cid}. POSIÇÃO SEM PROTEÇÃO! FECHE MANUALMENTE OU IMPLEMENTE FECHAMENTO DE EMERGÊNCIA.")
+                            self.pending_order = None # Desbloquear se a publicação falhar
+                    # ----------------------------------------------------------
+
                 elif action == "tp1_partial_close":
                     # Ação 2 (Fechamento Parcial) concluída.
                     self.alerter.send_message(f"💰 TP1 ATINGIDO. {data.get('qty')} BTC fechados.")
                     
                     # Agora, executar Ação 3: Mover SL para Breakeven
-                    pos_idx = self.pending_order.get("pos_idx", 0)
+                    # [CORREÇÃO BUG 2] pos_idx agora vem do payload da ordem de fechamento
+                    pos_idx = data.get("pos_idx")
+                    if pos_idx is None:
+                         logger.error(f"Não foi possível mover SL para BE para {self.active_order_cid}: pos_idx ausente.")
+                         self.pending_order = None
+                         return
+
                     entry_price = self.active_position_details.get("entry_price")
                     
                     if self.move_sl_to_be and entry_price:
@@ -560,7 +601,8 @@ class TradingEngine:
                             # Atualizar o lock para esperar a *próxima* confirmação
                             self.pending_order = {
                                 "cid": mod_cid,
-                                "timestamp": time.time(),
+                                "timestamp": time.time(), # Reinicia o timer do deadlock
+                                "original_open_cid": self.active_order_cid, # Referência
                                 "action": "tp1_move_sl_be"
                             }
                             # Atualizar estado no DB e memória
@@ -588,6 +630,11 @@ class TradingEngine:
                     logger.info("SL movido para Breakeven com sucesso. Máquina de estados TP1 concluída.")
                     self.alerter.send_message(f"🛡️ SL movido para Breakeven. Posição restante está sem risco.")
                     self.pending_order = None # Desbloquear
+                elif action == "set_sl_after_open":
+                    # [CORREÇÃO BUG 2] Confirmação de que o SL inicial foi definido.
+                    logger.info(f"SL inicial para {self.active_order_cid} definido com sucesso.")
+                    self.alerter.send_message("✅ SL inicial definido. Posição protegida.")
+                    self.pending_order = None # Desbloquear
                 else:
                     logger.info(f"Modificação {cid} (Ação: {action}) confirmada. Desbloqueando.")
                     self.pending_order = None # Desbloquear
@@ -611,7 +658,7 @@ class TradingEngine:
 
     def _on_new_candle(self, message):
         try:
-            # --- [FIX BUG 1] Lógica de verificação de Lock e Timeout ---
+            # --- [CORREÇÃO DEADLOCK] Lógica de verificação de Lock e Timeout ---
             if self.pending_order:
                 cid = self.pending_order["cid"]
                 age = time.time() - self.pending_order["timestamp"]
@@ -624,7 +671,7 @@ class TradingEngine:
                 else:
                     # logger.debug(f"Processamento bloqueado. Aguardando ordem {cid} ({age:.0f}s).")
                     return # Bloqueado, mas sem timeout ainda
-            # --- [FIM FIX BUG 1] ---
+            # --- [FIM CORREÇÃO DEADLOCK] ---
                 
             candle = json.loads(message['data'])
             
@@ -636,7 +683,7 @@ class TradingEngine:
             if self.last_candle_time is not None and candle_time <= self.last_candle_time:
                 return # Vela antiga/duplicada
 
-            # (Atualização do DataFrame inalterada)
+            # Atualização do DataFrame
             new_data = {'open': float(candle['open']), 'high': float(candle['high']),
                         'low': float(candle['low']), 'close': float(candle['close']),
                         'volume': float(candle['volume'])}
@@ -653,7 +700,7 @@ class TradingEngine:
             self._calculate_indicators()
             last = self.df.iloc[-1]
             
-            # (Checagem de indicadores prontos inalterada)
+            # Checagem de indicadores prontos
             req_inds = [self.strategy.atr_col, self.strategy.ema_short_col, self.strategy.ema_long_col,
                         self.strategy.rsi_col, self.strategy.regime_col]
             if self.adx_threshold > 0:
@@ -667,110 +714,11 @@ class TradingEngine:
             # 2. Obter Posição Atual
             pos_size, pos_side, entry_px, pos_idx, cur_sl, cur_tp = self._get_current_position()
 
-            # 3. Lógica Principal
+            # 3. Lógica Principal: Delega para os handlers apropriados
             if pos_size > 0:
-                # --- [TEMOS POSIÇÃO] ---
-                
-                # Sincronizar estado se o TE reiniciou no meio de uma posição
-                if not self.active_order_cid:
-                    logger.warning("Posição encontrada, mas estado interno vazio. Forçando ressync.")
-                    self._sync_position_on_startup()
-                    return # Tentar novamente na próxima vela
-
-                details = self.active_position_details
-                is_tp1_hit = details.get('is_tp1_hit', False)
-                
-                # --- [NÍVEL AVANÇADO] Lógica de Gerenciamento de Posição ---
-                
-                # 3a. Checar se o TP1 (parcial) foi atingido
-                if not is_tp1_hit and self.tp1_rr > 0:
-                    tp1_price = details.get('tp1_price', 0.0)
-                    if tp1_price > 0:
-                        if (pos_side == 'Buy' and last['high'] >= tp1_price) or \
-                           (pos_side == 'Sell' and last['low'] <= tp1_price):
-                            
-                            logger.info(f"*** TP1 ATINGIDO (Preço: {tp1_price}) ***")
-                            close_qty = round(pos_size * self.tp1_close_perc, QTY_PRECISION)
-                            
-                            if close_qty < MIN_ORDER_QTY:
-                                logger.warning(f"Qtd de fechamento parcial ({close_qty}) muito baixa. Ignorando TP1.")
-                                # Marcar como "hit" para não checar de novo
-                                self._update_order_state_in_db(self.active_order_cid, is_tp1_hit=True)
-                                self.active_position_details['is_tp1_hit'] = True
-                                return
-                            
-                            # Iniciar a máquina de estados (Ação 1: Fechar Parcial)
-                            cid_close = self._publish_close_order(close_qty, pos_side, is_partial=True)
-                            if cid_close:
-                                self.pending_order = {
-                                    "cid": cid_close,
-                                    "timestamp": time.time(),
-                                    "action": "tp1_partial_close",
-                                    "pos_idx": pos_idx # Salvar para a Ação 3
-                                }
-                            return # Bloquear processamento até a Ação 1 ser confirmada
-
-                # 3b. Checar Sinal Oposto (Fechamento Total)
-                if signal_data:
-                    sig = signal_data['signal']
-                    if (pos_side == 'Buy' and sig == 'short') or (pos_side == 'Sell' and sig == 'long'):
-                        logger.info(f"Sinal OPOSTO ({sig}). Fechando {pos_side}...")
-                        self.alerter.send_message(f"🚨 SINAL OPOSTO: Fechando {pos_side}...")
-                        cid_close_total = self._publish_close_order(pos_size, pos_side, is_partial=False)
-                        if cid_close_total:
-                            self.pending_order = {
-                                "cid": cid_close_total,
-                                "timestamp": time.time(),
-                                "action": "close_total"
-                            }
-                        return
-
-                # 3c. Gerenciar Trailing Stop (Sempre ativo)
-                atr_off = last[self.strategy.atr_col] * self.config['risk_params'].get('atr_multiplier', 1.0)
-                new_sl = None
-                
-                if cur_sl is not None and cur_sl > 0:
-                    if pos_side == 'Buy':
-                        prop_sl = round(last['low'] - atr_off, PRICE_PRECISION)
-                        if prop_sl > cur_sl: new_sl = prop_sl
-                    elif pos_side == 'Sell':
-                        prop_sl = round(last['high'] + atr_off, PRICE_PRECISION)
-                        if prop_sl < cur_sl: new_sl = prop_sl
-                
-                if new_sl:
-                    if abs(new_sl - cur_sl) < (entry_px * 0.0001): # Tolerância
-                         return # Modificação insignificante
-                    
-                    logger.info(f"Trailing Stop: Movendo SL {pos_side} de {cur_sl:.{PRICE_PRECISION}f} -> {new_sl:.{PRICE_PRECISION}f}")
-                    self.alerter.send_message(f"📈 TRAILING STOP: SL -> {new_sl:.{PRICE_PRECISION}f}")
-                    
-                    # Preservar o TP existente (que deve ser 0 se o TP1 já foi atingido)
-                    cid_mod = self._publish_modify_order(pos_idx, new_sl, cur_tp if cur_tp else 0.0)
-                    if cid_mod:
-                        self.pending_order = {
-                            "cid": cid_mod,
-                            "timestamp": time.time(),
-                            "action": "trailing_stop"
-                        }
-                    return
-
+                self._handle_active_position(last, signal_data, pos_size, pos_side, entry_px, pos_idx, cur_sl, cur_tp)
             elif signal_data:
-                # --- [SEM POSIÇÃO E TEM SINAL] ---
-                adx = f"{signal_data.get('adx_value', 0):.1f}" if 'adx_value' in signal_data else "N/A"
-                logger.info(f"SINAL ENTRADA: {signal_data['signal'].upper()} (ADX: {adx})")
-                
-                # Resetar estado (garantia)
-                self.active_order_cid = None
-                self.active_position_details = {}
-                
-                cid_open = self._publish_open_order(signal_data, last['close'])
-                if cid_open:
-                    self.pending_order = {
-                        "cid": cid_open,
-                        "timestamp": time.time(),
-                        "action": "open"
-                    }
-                return
+                self._handle_no_position(last, signal_data)
 
         except json.JSONDecodeError:
             logger.error(f"JSON Decode Error (Candle): {message.get('data')}")
@@ -782,6 +730,117 @@ class TradingEngine:
                  self.redis_client.set(f"heartbeat:{self.__class__.__name__}", int(time.time()))
              except Exception as e:
                  logger.error(f"TE Heartbeat Error (on_candle): {e}")
+
+    def _handle_active_position(self, last_candle: pd.Series, signal_data: dict, pos_size: float, pos_side: str, entry_px: float, pos_idx: int, cur_sl: float, cur_tp: float):
+        """Lógica de gerenciamento para quando uma posição está ativa."""
+        # Sincronizar estado se o TE reiniciou no meio de uma posição
+        if not self.active_order_cid:
+            logger.warning("Posição encontrada, mas estado interno vazio. Forçando ressync.")
+            self._sync_position_on_startup()
+            return # Tentar novamente na próxima vela
+
+        # 1. Checar Sinal Oposto (Fechamento Total) - PRIORIDADE MÁXIMA
+        if self._check_and_handle_close_signal(signal_data, pos_size, pos_side):
+            return # Bloqueia outras ações se um fechamento foi iniciado
+
+        # 2. Checar TP1 (Take Profit Parcial)
+        if self._check_and_handle_tp1(last_candle, pos_size, pos_side, pos_idx):
+            return # Bloqueia outras ações se o TP1 foi acionado
+
+        # 3. Gerenciar Trailing Stop
+        self._check_and_handle_trailing_stop(last_candle, pos_side, entry_px, pos_idx, cur_sl, cur_tp)
+
+    def _check_and_handle_tp1(self, last_candle: pd.Series, pos_size: float, pos_side: str, pos_idx: int) -> bool:
+        """Verifica se o TP1 foi atingido e inicia o processo de fechamento parcial."""
+        details = self.active_position_details
+        is_tp1_hit = details.get('is_tp1_hit', False)
+
+        if not is_tp1_hit and self.tp1_rr > 0:
+            tp1_price = details.get('tp1_price', 0.0)
+            if tp1_price > 0:
+                if (pos_side == 'Buy' and last_candle['high'] >= tp1_price) or \
+                   (pos_side == 'Sell' and last_candle['low'] <= tp1_price):
+                    
+                    logger.info(f"*** TP1 ATINGIDO (Preço: {tp1_price}) ***")
+                    close_qty = round(pos_size * self.tp1_close_perc, QTY_PRECISION)
+                    
+                    if close_qty < MIN_ORDER_QTY:
+                        logger.warning(f"Qtd de fechamento parcial ({close_qty}) muito baixa. Ignorando TP1.")
+                        self._update_order_state_in_db(self.active_order_cid, is_tp1_hit=True)
+                        self.active_position_details['is_tp1_hit'] = True
+                        return False # Não bloqueia, mas marca como feito
+                    
+                    cid_close = self._publish_close_order(close_qty, pos_side, is_partial=True)
+                    if cid_close:
+                        self.pending_order = {
+                            "cid": cid_close, "timestamp": time.time(),
+                            "action": "tp1_partial_close",
+                            # [CORREÇÃO BUG 2] Passar o pos_idx para a próxima etapa
+                            "pos_idx": pos_idx 
+                        }
+                    return True # Bloqueia
+        return False
+
+    def _check_and_handle_close_signal(self, signal_data: dict, pos_size: float, pos_side: str) -> bool:
+        """Verifica se há um sinal oposto para fechar a posição inteira."""
+        if signal_data:
+            sig = signal_data['signal']
+            if (pos_side == 'Buy' and sig == 'short') or (pos_side == 'Sell' and sig == 'long'):
+                logger.info(f"Sinal OPOSTO ({sig}). Fechando {pos_side}...")
+                self.alerter.send_message(f"🚨 SINAL OPOSTO: Fechando {pos_side}...")
+                cid_close_total = self._publish_close_order(pos_size, pos_side, is_partial=False)
+                if cid_close_total:
+                    self.pending_order = {"cid": cid_close_total, "timestamp": time.time(), "action": "close_total"}
+                return True # Bloqueia
+        return False
+
+    def _check_and_handle_trailing_stop(self, last_candle: pd.Series, pos_side: str, entry_px: float, pos_idx: int, cur_sl: float, cur_tp: float):
+        """Calcula e aplica o Trailing Stop Loss."""
+        atr_off = last_candle[self.strategy.atr_col] * self.config['risk_params'].get('atr_multiplier', 1.0)
+        new_sl = None
+
+        # Nota: O TP atual (cur_tp) será cancelado (setado para 0.0) se o trailing stop for ativado,
+        # pois o bot assume o gerenciamento completo do TP1 e do SL.
+        # Se houver um TP externo, ele será sobrescrito.
+        
+        if cur_sl is not None and cur_sl > 0:
+            if pos_side == 'Buy':
+                prop_sl = round(last_candle['low'] - atr_off, PRICE_PRECISION)
+                if prop_sl > cur_sl: new_sl = prop_sl
+            elif pos_side == 'Sell':
+                prop_sl = round(last_candle['high'] + atr_off, PRICE_PRECISION)
+                if prop_sl < cur_sl: new_sl = prop_sl
+        
+        if new_sl:
+            if abs(new_sl - cur_sl) < (entry_px * 0.0001): return # Modificação insignificante
+            
+            logger.info(f"Trailing Stop: Movendo SL {pos_side} de {cur_sl:.{PRICE_PRECISION}f} -> {new_sl:.{PRICE_PRECISION}f}")
+            self.alerter.send_message(f"📈 TRAILING STOP: SL -> {new_sl:.{PRICE_PRECISION}f}")
+
+            # Passar 0.0 para TP para garantir que qualquer TP existente seja cancelado,
+            # já que o bot gerencia o TP1 e o SL.
+            # Se o TP1 já foi atingido, o TP é 0.0 de qualquer forma.
+            # Se não foi, o bot não quer um TP fixo além do TP1.
+            cid_mod = self._publish_modify_order(pos_idx, new_sl, cur_tp if cur_tp else 0.0)
+            if cid_mod:
+                self.pending_order = {"cid": cid_mod, "timestamp": time.time(), "action": "trailing_stop"}
+
+    def _handle_no_position(self, last_candle: pd.Series, signal_data: dict):
+        """Lógica de gerenciamento para quando não há posição e um sinal aparece."""
+        adx = f"{signal_data.get('adx_value', 0):.1f}" if 'adx_value' in signal_data else "N/A"
+        logger.info(f"SINAL ENTRADA: {signal_data['signal'].upper()} (ADX: {adx})")
+        
+        # Resetar estado (garantia)
+        self.active_order_cid = None
+        self.active_position_details = {}
+        
+        cid_open = self._publish_open_order(signal_data, last_candle['close'])
+        if cid_open:
+            self.pending_order = {
+                "cid": cid_open,
+                "timestamp": time.time(),
+                "action": "open"
+            }
 
     def run(self):
         # (Código inalterado, incluindo lógica de reconexão do PubSub)

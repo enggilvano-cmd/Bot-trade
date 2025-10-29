@@ -8,10 +8,13 @@ DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./trading_system.db")
 # O check_same_thread=False é necessário APENAS para SQLite
 engine_args = {}
 if DATABASE_URL.startswith("sqlite"):
+    # AVISO: SQLite não é recomendado para produção, especialmente com múltiplos processos.
+    # Para modo LIVE, o sistema deve ser configurado para usar PostgreSQL.
     engine_args["connect_args"] = {"check_same_thread": False}
     print("AVISO: Usando SQLite. Não recomendado para produção com múltiplos processos.")
 elif DATABASE_URL.startswith("postgresql"):
      print("Usando PostgreSQL.")
+
 
 engine = create_engine(DATABASE_URL, **engine_args)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
