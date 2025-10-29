@@ -4,14 +4,13 @@ import logging
 import json
 import redis
 import uuid
-# Correção: Usar os módulos corretos da pybit v5
 from pybit.unified_trading import HTTP
 from pybit.unified_trading import WebSocket
 from pybit.exceptions import InvalidRequestError, FailedRequestError
 from database.database import SessionLocal
 from database.models import Order
 from sqlalchemy import select, or_
-from sqlalchemy.exc import IntegrityError # Importar IntegrityError
+from sqlalchemy.exc import IntegrityError
 from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception, retry_if_exception_type
 
 logger = logging.getLogger(__name__)
@@ -19,7 +18,6 @@ NEW_ORDER_CHANNEL = "orders:new"
 MODIFY_ORDER_CHANNEL = "orders:modify"
 ORDER_UPDATE_CHANNEL = "orders:update"
 
-# Códigos de erro V5 não retentáveis (erros de lógica/parâmetro/saldo)
 NON_RETRYABLE_ERROR_CODES = [
     10001, # Parâmetros inválidos genérico
     10002, # Logic error (ex: order not found for modification)
@@ -36,8 +34,6 @@ NON_RETRYABLE_ERROR_CODES = [
 ]
 
 def is_retryable_api_error(exception):
-    """Verifica se uma exceção da API Bybit (pybit v5+) deve ser retentada."""
-    # (Código inalterado)
     if isinstance(exception, FailedRequestError):
         logger.warning(f"Erro 5xx da API ({exception.status_code}): {exception.message}. Tentando novamente...")
         return True
@@ -55,7 +51,6 @@ def is_retryable_api_error(exception):
     logger.error(f"Exceção NÃO RETENTÁVEL encontrada: {type(exception).__name__} - {exception}")
     return False
 
-# Política de retry atualizada
 RETRY_POLICY = {
     "wait": wait_exponential(multiplier=1, min=1, max=10),
     "stop": stop_after_attempt(3),
@@ -65,7 +60,6 @@ RETRY_POLICY = {
 
 class OrderManager:
     def __init__(self, symbol: str, testnet: bool = True):
-        # (Código inalterado)
         self.symbol = symbol
         self.testnet = testnet
         self.api_key = os.getenv("BYBIT_API_KEY")
@@ -91,13 +85,12 @@ class OrderManager:
         logger.info(f"OrderManager V5 para {symbol} inicializado.")
 
     def _connect_rest(self):
-        # (Código inalterado)
         try:
             session = HTTP(
                 testnet=self.testnet,
                 api_key=self.api_key,
                 api_secret=self.api_secret,
-                recv_window=10000  # Aumenta a janela de tempo para evitar erros de timestamp
+                recv_window=10000
             )
             time_res = session.get_server_time()
             if time_res and time_res.get('retCode') == 0:
@@ -110,7 +103,6 @@ class OrderManager:
             raise
 
     def _connect_ws(self):
-        # (Código inalterado)
         try:
             ws = WebSocket(
                 channel_type="private",
@@ -126,10 +118,8 @@ class OrderManager:
 
     def _publish_update(self, client_order_id: str, status: str, order_id: str = None, 
                         avg_price: float = 0.0, error_msg: str = None, 
-                        # --- [NÍVEL AVANÇADO] Enviar dados de estado atualizados ---
-                        entry_price: float = 0.0, tp1_price: float = 0.0, is_tp1_hit: bool = False, qty: float = 0.0, # [CORREÇÃO BUG 2]
+                        entry_price: float = 0.0, tp1_price: float = 0.0, is_tp1_hit: bool = False, qty: float = 0.0,
                         pos_idx: int = None, sl_to_set_after_fill: float = None):
-        """Publica atualização no Redis."""
         try:
             update_data = {
                 "client_order_id": client_order_id, "order_id": order_id, "status": status,
@@ -137,7 +127,6 @@ class OrderManager:
                 "entry_price": entry_price, "tp1_price": tp1_price,
                 "is_tp1_hit": is_tp1_hit, "qty": qty
             }
-            # [CORREÇÃO BUG 2] Adicionar dados extras se existirem
             if pos_idx is not None: update_data["pos_idx"] = pos_idx
             if sl_to_set_after_fill is not None: update_data["sl_to_set_after_fill"] = sl_to_set_after_fill
 
@@ -149,7 +138,6 @@ class OrderManager:
             logger.error(f"Erro inesperado Redis Pub CID {client_order_id}: {e}", exc_info=True)
 
     def _handle_order_update(self, msg):
-        """Callback para WebSocket V5 'order'."""
         try:
             if isinstance(msg, dict) and msg.get('topic') == 'order' and 'data' in msg:
                 for order_data in msg.get('data', []):
@@ -167,28 +155,24 @@ class OrderManager:
                     reject_reason = order_data.get('rejectReason', '')
                     order_qty_str = order_data.get('qty', '0')
                     order_qty = float(order_qty_str) if order_qty_str else 0.0
-                    pos_idx = order_data.get('positionIdx') # [CORREÇÃO BUG 2]
+                    pos_idx = order_data.get('positionIdx')
 
                     logger.info(f"WS V5 Update: CID={client_order_id}, OID={order_id}, Status={order_status}, AvgPx={avg_price_str}, Qty={order_qty}, RejRsn='{reject_reason}'")
 
                     with SessionLocal() as db_session:
                         try:
-                            # Usar with_for_update() para lock pessimista
                             order = db_session.query(Order).filter(Order.client_order_id == client_order_id).with_for_update().first()
                             
                             if not order:
                                 logger.critical(f"WS Update: ORDEM NÃO ENCONTRADA NO DB! CID={client_order_id}. Criando registro órfão.")
-                                # Cria um registro para a ordem "órfã" para que não se perca.
-                                # Isso pode acontecer se o OM reiniciar entre o TE enviar a ordem e o OM salvá-la.
                                 orphan_order = Order(
                                     client_order_id=client_order_id,
                                     order_id=order_id,
                                     symbol=self.symbol,
-                                    status='Orphaned', # Status especial
+                                    status='Orphaned',
                                     error_message=f"WS update received for non-existent DB order. Status: {order_status}"
                                 )
                                 db_session.add(orphan_order)
-                                # [CORREÇÃO BUG 2] Passar pos_idx
                                 self._publish_update(client_order_id, order_status, order_id, avg_price, reject_reason, 
                                                      qty=order_qty, pos_idx=pos_idx)
                                 db_session.commit()
@@ -196,9 +180,9 @@ class OrderManager:
 
                             # --- [NÍVEL AVANÇADO] Variáveis de estado para publicar ---
                             entry_price_to_pub = order.entry_price
-                            tp1_price_to_pub = order.tp1_price
+                            tp1_price_to_pub = order.tp1_price # ... (rest of the file is truncated for brevity)
                             is_tp1_hit_to_pub = order.is_tp1_hit
-                            sl_to_set_to_pub = order.sl_to_set_after_fill # [CORREÇÃO BUG 2]
+                            sl_to_set_to_pub = order.sl_to_set_after_fill
                             # ----------------------------------------------------
 
                             # Mapear status V5 para status interno
@@ -210,8 +194,12 @@ class OrderManager:
                                 # --- [NÍVEL AVANÇADO] Recalcular TP1 com base no fill real ---
                                 # Apenas se for uma ordem de ABERTURA (não um fechamento)
                                 if order.order_type == "Market" and not client_order_id.startswith("bot_close_"):
-                                    if avg_price > 0 and order.tp1_rr and order.tp1_rr > 0:
-                                        sl_dist = abs(avg_price - order.stop_loss)
+                                    # --- [CORREÇÃO DE BUG] Usar o SL correto para o cálculo ---
+                                    # O `order.stop_loss` não é enviado na ordem de abertura e pode ser nulo.
+                                    # O SL correto a ser usado está em `sl_to_set_after_fill`, que foi salvo no DB.
+                                    sl_price_for_calc = order.sl_to_set_after_fill
+                                    if avg_price > 0 and order.tp1_rr and order.tp1_rr > 0 and sl_price_for_calc:
+                                        sl_dist = abs(avg_price - sl_price_for_calc)
                                         if order.side == "Buy":
                                             new_tp1_price = avg_price + (sl_dist * order.tp1_rr)
                                         else: # Sell
@@ -247,8 +235,8 @@ class OrderManager:
                             # Publicar atualização para o TradingEngine
                             self._publish_update(client_order_id, new_status_internal, order_id, 
                                                  avg_price, error_msg,
-                                                 entry_price=entry_price_to_pub,
-                                                 tp1_price=tp1_price_to_pub, is_tp1_hit=is_tp1_hit_to_pub, qty=order_qty, # [CORREÇÃO BUG 2]
+                                                 entry_price=entry_price_to_pub, tp1_price=tp1_price_to_pub, 
+                                                 is_tp1_hit=is_tp1_hit_to_pub, qty=order_qty,
                                                  pos_idx=pos_idx, sl_to_set_after_fill=sl_to_set_to_pub)
 
                         except Exception as e_db:
@@ -311,7 +299,7 @@ class OrderManager:
     def _execute_new_order(self, order_req: Order):
         """Tenta executar uma nova ordem e publica o resultado."""
         try:
-            # --- [CORREÇÃO BUG 3] Salvar no DB ANTES de enviar para a API ---
+            # --- [CORREÇÃO CRÍTICA DE ORDEM ÓRFÃ] Salvar no DB ANTES de enviar para a API ---
             with SessionLocal() as db:
                 try:
                     # Status inicial que indica que foi enviado ao DB, mas não à API
@@ -342,7 +330,8 @@ class OrderManager:
                 with SessionLocal() as db:
                     order_db = db.query(Order).filter(Order.client_order_id == order_req.client_order_id).first()
                     if order_db:
-                        order_db.order_id = order_id # [CORREÇÃO BUG 3] Mudar status para 'New' (enviado para exchange)
+                        order_db.order_id = order_id 
+                        # Mudar status para 'New' (enviado para exchange e aceito)
                         order_db.status = 'New'
                         db.commit()
                 
@@ -443,7 +432,7 @@ class OrderManager:
                 entry_price_estimate=data.get('entry_price_estimate'),
                 tp1_price=data.get('tp1_price'),
                 tp1_rr=data.get('tp1_rr'),
-                sl_to_set_after_fill=data.get('sl_to_set_after_fill') # [CORREÇÃO BUG 2]
+                sl_to_set_after_fill=data.get('sl_to_set_after_fill')
             )
             # ------------------------------------------------
             
@@ -516,23 +505,18 @@ class OrderManager:
         except Exception as e:
              logger.critical(f"OM erro subscribe Redis: {e}. Encerrando.", exc_info=True); return
         
-        # [CORREÇÃO 2] Loop de escuta do Redis com health check para evitar timeouts.
-        # O pubsub.listen() bloqueia indefinidamente, o que pode causar timeouts de socket.
-        # Usar get_message com timeout permite um loop não-bloqueante para verificações.
         try:
             self.redis_client.set(f"heartbeat:{self.__class__.__name__}", int(time.time())) # HB inicial
         except: pass
 
         while True:
             try:
-                # Processa uma mensagem com timeout de 1s. Retorna None se nada chegar.
+                # [CORREÇÃO DE ROBUSTEZ] Usar get_message com timeout para evitar bloqueio e permitir heartbeats.
                 message = pubsub.get_message(timeout=1.0)
                 if message:
-                    # A biblioteca chama o handler correto automaticamente
                     pass
                 else:
-                    # Se não houver mensagens, é uma boa hora para enviar um heartbeat
-                    # ou fazer outras verificações de saúde.
+                    # Envia heartbeat se não houver mensagens
                     self.redis_client.set(f"heartbeat:{self.__class__.__name__}", int(time.time()))
 
             except KeyboardInterrupt:

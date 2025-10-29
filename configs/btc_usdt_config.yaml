@@ -27,7 +27,7 @@ strategy_params:
   # Define a força mínima da tendência (ADX) para abrir uma posição.
   # 0 = Desativado
   adx_period: 14
-  adx_threshold: 0 # 20
+  adx_threshold: 20
 
 # Parâmetros de Risco
 risk_params:

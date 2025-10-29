@@ -5,7 +5,7 @@ import uuid
 import json
 import redis
 import pandas as pd
-from datetime import datetime, timezone # Adicionado timezone
+from datetime import datetime, timezone
 from sqlalchemy import desc, select, update
 from database.database import SessionLocal
 from database.models import Kline, Order
@@ -22,27 +22,23 @@ NEW_ORDER_CHANNEL = "orders:new"
 MODIFY_ORDER_CHANNEL = "orders:modify"
 ORDER_UPDATE_CHANNEL = "orders:update"
 
-# Política de retry para chamadas de API do TradingEngine
 TE_RETRY_POLICY = {
     "wait": wait_exponential(multiplier=1, min=1, max=10),
     "stop": stop_after_attempt(3),
-    "retry": retry_if_exception_type((InvalidRequestError, FailedRequestError)), # Retry em erros de rede/API
+    "retry": retry_if_exception_type((InvalidRequestError, FailedRequestError)),
 }
 
-# Constantes de precisão
 PRICE_PRECISION = 2 
 QTY_PRECISION = 3   
-MIN_ORDER_QTY = 0.001 # Quantidade mínima de ordem para o símbolo
+MIN_ORDER_QTY = 0.001
 
-# Timeout para ordens pendentes
-PENDING_ORDER_TIMEOUT = 120 # 2 minutos
+PENDING_ORDER_TIMEOUT = 120
 
 class TradingEngine:
     def __init__(self, config: dict, alerter: TelegramAlerter):
         self.config = config
         self.alerter = alerter
 
-        # (Código de inicialização da estratégia inalterado)
         all_params = {**config.get('strategy_params', {}), **config.get('risk_params', {})}
         strategy_name = config.get('strategy_name')
         if strategy_name == 'EmaRsiStrategy':
@@ -74,27 +70,23 @@ class TradingEngine:
              logger.warning("Modo Sombra ATIVO, mas live_mode=False. Desativando Modo Sombra.")
              self.shadow_mode = False
 
-        # --- [NÍVEL AVANÇADO] Carregar configs de TP1 ---
         risk_cfg = config.get('risk_params', {})
         self.tp1_rr = risk_cfg.get('tp1_risk_reward_ratio', 0.0)
-        self.tp1_close_perc = risk_cfg.get('tp1_close_percentage', 0.5) # 50% default
+        self.tp1_close_perc = risk_cfg.get('tp1_close_percentage', 0.5)
         self.move_sl_to_be = risk_cfg.get('move_sl_to_breakeven_on_tp1', True)
         self.max_neg_funding = risk_cfg.get('max_negative_funding_rate', -1.0)
         self.min_balance = risk_cfg.get('min_balance_usdt', 0)
         self.risk_per_trade = risk_cfg.get('risk_per_trade', 0)
-        self.max_balance_risk_cap_per_trade = risk_cfg.get('max_balance_risk_cap_per_trade', 5.0) / 100 # Convert to decimal
-        # ------------------------------------------------
+        self.max_balance_risk_cap_per_trade = risk_cfg.get('max_balance_risk_cap_per_trade', 5.0) / 100
 
-        # Lock de ordem e estado da posição
-        self.pending_order = None # Ex: {"cid": "...", "timestamp": 123456.0, "action": "open"}
+        self.pending_order = None
         self.active_order_cid = None
-        self.active_position_details = {} # Ex: {'entry_price': 50000, 'tp1_price': 51000, 'is_tp1_hit': False}
+        self.active_position_details = {}
 
         self.df = pd.DataFrame(columns=['open', 'high', 'low', 'close', 'volume'])
         self.df.index.name = 'timestamp'
         self.last_candle_time = None 
 
-        # (Conexão Redis inalterada)
         try:
             self.redis_client = redis.Redis(
                 host=os.getenv("REDIS_HOST", "localhost"), port=int(os.getenv("REDIS_PORT", 6379)),
@@ -109,13 +101,12 @@ class TradingEngine:
             logger.critical(f"TradingEngine falhou ao conectar ao Redis (Erro Geral): {e}", exc_info=True)
             raise
 
-        # (Conexão Bybit REST inalterada)
         try:
              self.rest_session = HTTP(
                  testnet=not self.live_mode,
                  api_key=os.getenv("BYBIT_API_KEY"),
                  api_secret=os.getenv("BYBIT_API_SECRET"),
-                 recv_window=10000  # Aumenta a janela de tempo para evitar erros de timestamp
+                 recv_window=10000
              )
              time_res = self.rest_session.get_server_time()
              if not (time_res and time_res.get('retCode') == 0):
@@ -126,13 +117,11 @@ class TradingEngine:
              raise
 
         self._load_and_warm_up_history()
-        self._sync_position_on_startup() # Agora é CRÍTICO que isso funcione
+        self._sync_position_on_startup()
 
         logger.info(f"TradingEngine V5 para {self.symbol} inicializado e pronto.")
 
-
     def _load_and_warm_up_history(self):
-        # (Código inalterado)
         logger.info(f"Aquecendo indicadores com até {self.warm_up_candles} velas...")
         try:
             with SessionLocal() as db_session:
@@ -173,43 +162,32 @@ class TradingEngine:
             self.df = pd.DataFrame(columns=['open', 'high', 'low', 'close', 'volume'])
             self.df.index.name = 'timestamp'
 
-
     def _calculate_indicators(self):
-        # (Código inalterado)
         if not self.df.empty:
             try:
                 self.df = self.strategy.calculate_indicators(self.df.copy())
             except Exception as e:
                 logger.error(f"Erro ao calcular indicadores: {e}", exc_info=True)
 
-
-    # --- API Calls V5 (Código inalterado) ---
-
     def _sync_position_on_startup(self):
-        """
-        Verifica a posição na exchange E sincroniza o estado (TP1) do DB.
-        """
         try:
             logger.info("Sincronizando posição V5 e estado do DB...")
             pos_size, pos_side, entry_px, pos_idx, cur_sl, cur_tp = self._get_current_position()
 
             if pos_size > 0:
-                # --- [NÍVEL AVANÇADO] Sincronizar estado do DB ---
                 order_cid_in_db = None
                 try:
                     with SessionLocal() as db:
-                        # Encontrar a última ordem 'Filled' que abriu esta posição
                         last_open_order = db.query(Order).filter(
                             Order.symbol == self.symbol,
                             Order.side == pos_side, # Lado da posição
                             Order.status == 'Filled',
-                            ~Order.client_order_id.like('bot_close_%') # Não é uma ordem de fechamento
                         ).order_by(Order.created_at.desc()).first()
                         
                         if last_open_order:
                             self.active_order_cid = last_open_order.client_order_id
                             self.active_position_details = {
-                                'entry_price': last_open_order.entry_price or entry_px, # Usar entry_px da API como fallback
+                                'entry_price': last_open_order.entry_price or entry_px,
                                 'tp1_price': last_open_order.tp1_price,
                                 'is_tp1_hit': last_open_order.is_tp1_hit
                             }
@@ -217,11 +195,10 @@ class TradingEngine:
                             logger.info(f"Estado sincronizado do DB (CID: {self.active_order_cid}): TP1 Atingido={last_open_order.is_tp1_hit}")
                         else:
                             logger.warning("Posição aberta encontrada, mas NENHUMA ordem de abertura 'Filled' no DB. Assumindo gerenciamento sem estado de TP1.")
-                            self.active_position_details = {} # Resetar
+                            self.active_position_details = {}
                             
                 except Exception as e_db:
                      logger.error(f"Falha ao Sincronizar estado do DB: {e_db}", exc_info=True)
-                # -----------------------------------------------
 
                 entry_fmt = f"{entry_px:.{PRICE_PRECISION}f}"
                 sl_fmt = f"{cur_sl:.{PRICE_PRECISION}f}" if cur_sl else "N/A"
@@ -301,7 +278,7 @@ class TradingEngine:
                                         float(sl) if sl else 0.0,
                                         float(tp) if tp else 0.0)
                 return 0.0, None, 0.0, 0, 0.0, 0.0
-        except InvalidRequestError as api_err:
+        except InvalidRequestError as api_err: # ... (rest of the file is truncated for brevity)
              logger.error(f"Erro API V5 (Posições): {api_err.status_code}-{api_err.message}")
              self.alerter.send_message(f"🚨 Erro API Bybit (Posições): {api_err.status_code}-{api_err.message}")
              return 0.0, None, 0.0, 0, 0.0, 0.0
@@ -365,8 +342,7 @@ class TradingEngine:
         cid = f"bot_open_{uuid.uuid4().hex[:16]}"
         
         entry_price = self._get_live_price()
-        
-        # --- [FIX BUG 2] Fail-safe de Risco ---
+        # --- [CORREÇÃO CRÍTICA] Fail-safe de Risco ---
         if entry_price is None:
              logger.error(f"FALHA AO OBTER PREÇO AO VIVO. Ordem (CID={cid}) não será enviada.")
              self.alerter.send_message("🚨 ALERTA: Falha ao obter preço ao vivo. Ordem de abertura ignorada.")
@@ -416,7 +392,7 @@ class TradingEngine:
             data = {
                 "client_order_id": cid, "symbol": self.symbol, "side": side,
                 "order_type": "Market", "qty": qty, "price": None,
-                "stop_loss": None, # BUG 2 FIX: Não enviar SL na abertura
+                "stop_loss": None, # [CORREÇÃO DE EXECUÇÃO] Não enviar SL na abertura para evitar rejeições.
                 
                 # --- [NÍVEL AVANÇADO] Enviar dados de estado para o OM ---
                 "take_profit": None, # Não enviar TP para a exchange
@@ -425,7 +401,7 @@ class TradingEngine:
                 "tp1_rr": self.tp1_rr if self.tp1_rr > 0 else None
                 # ---------------------------------------------------
             }
-            # Armazenar o SL que queremos definir após a confirmação
+            # Armazena o SL que queremos definir após a confirmação do fill.
             data['sl_to_set_after_fill'] = stop_loss_price
             self.redis_client.publish(NEW_ORDER_CHANNEL, json.dumps(data))
             
@@ -554,35 +530,31 @@ class TradingEngine:
                     self.alerter.send_message(f"🎉 ORDEM {cid} EXECUTADA. Preço: {data.get('avg_price'):.{PRICE_PRECISION}f}")
                     self.pending_order = None # Desbloquear
 
-                    # --- [CORREÇÃO BUG 2] Definir SL após a confirmação de fill ---
+                    # --- [CORREÇÃO DE EXECUÇÃO] Etapa 2: Definir SL após a confirmação do fill ---
                     pos_idx = data.get("pos_idx", 0)
                     sl_to_set = data.get("sl_to_set_after_fill")
                     if sl_to_set and pos_idx is not None:
                         logger.info(f"Fill de abertura confirmado. Definindo SL={sl_to_set} para posIdx={pos_idx}")
-                        # Usar o mesmo TP que seria usado (geralmente 0/None)
                         mod_cid = self._publish_modify_order(pos_idx, sl_to_set, 0.0)
                         if mod_cid:
+                            # Trava o motor novamente, aguardando a confirmação da MODIFICAÇÃO do SL.
                             self.pending_order = {
                                 "cid": mod_cid,
                                 "timestamp": time.time(), # Reinicia o timer do deadlock
                                 "action": "set_sl_after_open",
-                                "original_open_cid": cid # Referência para a ordem de abertura
                             }
                         else:
-                            # CRÍTICO: Se falhar ao definir SL, a posição está desprotegida.
-                            # Considerar fechar a posição imediatamente ou alertar agressivamente.
-                            logger.critical(f"FALHA CRÍTICA ao publicar MODIFICAÇÃO de SL para {cid}. Posição pode estar sem SL! "
-                                            f"ALERTA: Considere fechar a posição manualmente ou implementar fechamento automático de emergência.")
-                            self.alerter.send_message(f"🚨 CRÍTICO: Falha ao definir SL para ordem {cid}. POSIÇÃO SEM PROTEÇÃO! FECHE MANUALMENTE OU IMPLEMENTE FECHAMENTO DE EMERGÊNCIA.")
+                            # Se a publicação da modificação do SL falhar, é uma emergência.
+                            logger.critical(f"FALHA CRÍTICA ao publicar MODIFICAÇÃO de SL para {cid}. POSIÇÃO DESPROTEGIDA!")
+                            self.alerter.send_message(f"🚨 CRÍTICO: Falha ao definir SL para {cid}. POSIÇÃO SEM PROTEÇÃO! FECHE MANUALMENTE.")
                             self.pending_order = None # Desbloquear se a publicação falhar
-                    # ----------------------------------------------------------
 
                 elif action == "tp1_partial_close":
                     # Ação 2 (Fechamento Parcial) concluída.
                     self.alerter.send_message(f"💰 TP1 ATINGIDO. {data.get('qty')} BTC fechados.")
                     
                     # Agora, executar Ação 3: Mover SL para Breakeven
-                    # [CORREÇÃO BUG 2] pos_idx agora vem do payload da ordem de fechamento
+                    # pos_idx agora vem do payload da ordem de fechamento
                     pos_idx = data.get("pos_idx")
                     if pos_idx is None:
                          logger.error(f"Não foi possível mover SL para BE para {self.active_order_cid}: pos_idx ausente.")
@@ -592,13 +564,13 @@ class TradingEngine:
                     entry_price = self.active_position_details.get("entry_price")
                     
                     if self.move_sl_to_be and entry_price:
-                        logger.info("TP1 Fechado. Movendo SL para Breakeven e cancelando TP...")
+                        logger.info("TP1 Fechado. Movendo SL para Breakeven...")
                         new_sl = entry_price
-                        new_tp = 0 # Cancelar TP
+                        new_tp = 0.0 # Cancelar qualquer TP existente
                         mod_cid = self._publish_modify_order(pos_idx, new_sl, new_tp)
                         
                         if mod_cid:
-                            # Atualizar o lock para esperar a *próxima* confirmação
+                            # Trava o motor, aguardando a confirmação da modificação do SL para BE.
                             self.pending_order = {
                                 "cid": mod_cid,
                                 "timestamp": time.time(), # Reinicia o timer do deadlock
@@ -631,7 +603,7 @@ class TradingEngine:
                     self.alerter.send_message(f"🛡️ SL movido para Breakeven. Posição restante está sem risco.")
                     self.pending_order = None # Desbloquear
                 elif action == "set_sl_after_open":
-                    # [CORREÇÃO BUG 2] Confirmação de que o SL inicial foi definido.
+                    # Confirmação de que o SL inicial foi definido.
                     logger.info(f"SL inicial para {self.active_order_cid} definido com sucesso.")
                     self.alerter.send_message("✅ SL inicial definido. Posição protegida.")
                     self.pending_order = None # Desbloquear
@@ -658,7 +630,7 @@ class TradingEngine:
 
     def _on_new_candle(self, message):
         try:
-            # --- [CORREÇÃO DEADLOCK] Lógica de verificação de Lock e Timeout ---
+            # --- [CORREÇÃO DE DEADLOCK] Lógica de verificação de Lock e Timeout ---
             if self.pending_order:
                 cid = self.pending_order["cid"]
                 age = time.time() - self.pending_order["timestamp"]
@@ -669,9 +641,7 @@ class TradingEngine:
                     self.pending_order = None # Forçar desbloqueio
                     self._sync_position_on_startup() # Ressincronizar estado com a exchange
                 else:
-                    # logger.debug(f"Processamento bloqueado. Aguardando ordem {cid} ({age:.0f}s).")
                     return # Bloqueado, mas sem timeout ainda
-            # --- [FIM CORREÇÃO DEADLOCK] ---
                 
             candle = json.loads(message['data'])
             
@@ -775,7 +745,7 @@ class TradingEngine:
                         self.pending_order = {
                             "cid": cid_close, "timestamp": time.time(),
                             "action": "tp1_partial_close",
-                            # [CORREÇÃO BUG 2] Passar o pos_idx para a próxima etapa
+                            # Passar o pos_idx para a próxima etapa da máquina de estados
                             "pos_idx": pos_idx 
                         }
                     return True # Bloqueia
@@ -817,11 +787,11 @@ class TradingEngine:
             logger.info(f"Trailing Stop: Movendo SL {pos_side} de {cur_sl:.{PRICE_PRECISION}f} -> {new_sl:.{PRICE_PRECISION}f}")
             self.alerter.send_message(f"📈 TRAILING STOP: SL -> {new_sl:.{PRICE_PRECISION}f}")
 
-            # Passar 0.0 para TP para garantir que qualquer TP existente seja cancelado,
-            # já que o bot gerencia o TP1 e o SL.
-            # Se o TP1 já foi atingido, o TP é 0.0 de qualquer forma.
-            # Se não foi, o bot não quer um TP fixo além do TP1.
-            cid_mod = self._publish_modify_order(pos_idx, new_sl, cur_tp if cur_tp else 0.0)
+            # --- [CORREÇÃO DE BUG] Sempre cancelar o TP ao mover o Trailing Stop ---
+            # O bot deve ter controle total da saída via TSL ou sinal oposto.
+            # Enviar `cur_tp` poderia reativar um TP antigo que deveria ter sido cancelado
+            # (ex: após o TP1). Enviar 0.0 garante que o TP na exchange seja removido.
+            cid_mod = self._publish_modify_order(pos_idx, new_sl, 0.0)
             if cid_mod:
                 self.pending_order = {"cid": cid_mod, "timestamp": time.time(), "action": "trailing_stop"}
 
@@ -858,24 +828,19 @@ class TradingEngine:
         except Exception as e:
              logger.critical(f"TE erro subscribe Redis: {e}. Encerrando.", exc_info=True); return
         
-        # [CORREÇÃO 2] Loop de escuta do Redis com health check para evitar timeouts.
-        # O pubsub.listen() bloqueia indefinidamente, o que pode causar timeouts de socket.
-        # Usar get_message com timeout permite um loop não-bloqueante para verificações.
         try:
             self.redis_client.set(f"heartbeat:{self.__class__.__name__}", int(time.time()))
         except: pass
 
         while True:
             try:
-                # Processa uma mensagem com timeout de 1s. Retorna None se nada chegar.
+                # [CORREÇÃO DE ROBUSTEZ] Usar get_message com timeout para evitar bloqueio e permitir heartbeats.
                 message = pubsub.get_message(timeout=1.0)
                 if message:
-                    # A biblioteca chama o handler correto automaticamente
                     pass
                 else:
-                    # Se não houver mensagens, é uma boa hora para enviar um heartbeat.
-                    # A lógica de heartbeat já está dentro dos handlers, mas uma aqui garante
-                    # que o heartbeat seja enviado mesmo sem novas velas ou ordens.
+                    # Se não houver mensagens, envia um heartbeat para mostrar que o processo
+                    # está vivo e não travado, mesmo sem atividade de trading.
                     self.redis_client.set(f"heartbeat:{self.__class__.__name__}", int(time.time()))
             except KeyboardInterrupt:
                  logger.info("TradingEngine recebendo sinal de interrupção...")

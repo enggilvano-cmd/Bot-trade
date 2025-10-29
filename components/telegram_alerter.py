@@ -7,7 +7,6 @@ logger = logging.getLogger(__name__)
 
 class TelegramAlerter:
     def __init__(self):
-        # load_dotenv() # <-- REMOVIDO
         self.bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
         self.chat_id = os.getenv("TELEGRAM_CHAT_ID")
         
@@ -24,13 +23,9 @@ class TelegramAlerter:
 
     def send_message(self, text: str):
         if not self.bot:
-            # Não logar mensagens desativadas para não poluir o log
-            # logger.info(f"Alerta (desativado): {text}")
             return
 
         try:
-            # A biblioteca python-telegram-bot v20+ é assíncrona.
-            # Usamos asyncio.run() para executar a corrotina de envio de mensagem.
             asyncio.run(self.bot.send_message(chat_id=self.chat_id, text=text))
         except Exception as e:
             logger.error(f"Falha ao enviar mensagem para o Telegram: {e}")

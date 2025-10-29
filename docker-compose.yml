@@ -30,16 +30,11 @@ services:
     networks:
       - trading-net
 
-  # [CORREÇÃO 1] Adiciona um container para sincronizar o tempo do Docker.
-  # Isto é CRUCIAL para evitar erros de timestamp da API da Bybit, especialmente
-  # em ambientes como Docker Desktop no Windows/macOS onde o tempo pode dessincronizar.
   ntp-sync:
     image: cturra/ntp
     container_name: trading-system-ntp
     restart: "no"
-    # Privileged é necessário para que o container possa alterar o relógio do host do Docker.
     privileged: true
-    # Garante que este container inicie antes de qualquer outro serviço.
     networks:
       - trading-net
 
@@ -51,7 +46,7 @@ services:
       - .env
     depends_on:
       ntp-sync:
-        condition: service_started # Não precisa ser 'healthy', apenas iniciado.
+        condition: service_started
       postgres:
         condition: service_healthy
       redis:

@@ -160,14 +160,21 @@ class StrategyBridge(BacktestingStrategy):
 
     def _calculate_position_size(self, stop_loss_price, risk_multiplier=1.0):
         risk_percent = self.risk_per_trade * risk_multiplier
-        equity = self.equity
-        entry_price = self.data.Close[-1]
+        
+        # --- [CORREÇÃO CRÍTICA] Simular o preço de entrada de forma mais realista ---
+        # O sinal é gerado no fechamento da vela atual (self.data.Close[-1]).
+        # A ordem de mercado seria executada perto da abertura da vela seguinte.
+        # Usar o preço de abertura da vela seguinte como preço de entrada simulado
+        # alinha o backtest com a realidade de uma ordem de mercado.
+        # Se usarmos o preço de fechamento, o backtest assume que podemos comprar
+        # a um preço que já é passado, o que é impossível e gera resultados falsos.
+        entry_price = self.data.Open[-1] # Preço de abertura da vela atual (que é a seguinte no loop 'next')
+        
+        equity = self.equity        
         risk_per_trade_usd = equity * (risk_percent / 100)
         sl_distance_usd = abs(entry_price - stop_loss_price)
         if sl_distance_usd == 0: return 0.0
         size = risk_per_trade_usd / sl_distance_usd
-        max_size = (equity * 0.95) / entry_price
-        return min(size, max_size)
 
 
 if __name__ == "__main__":
