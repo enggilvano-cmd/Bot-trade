@@ -858,42 +858,30 @@ class TradingEngine:
         except Exception as e:
              logger.critical(f"TE erro subscribe Redis: {e}. Encerrando.", exc_info=True); return
         
+        # [CORREÇÃO 2] Loop de escuta do Redis com health check para evitar timeouts.
+        # O pubsub.listen() bloqueia indefinidamente, o que pode causar timeouts de socket.
+        # Usar get_message com timeout permite um loop não-bloqueante para verificações.
         try:
             self.redis_client.set(f"heartbeat:{self.__class__.__name__}", int(time.time()))
         except: pass
 
         while True:
             try:
-                for message in pubsub.listen(): pass
-                logger.critical("Loop pubsub.listen() do TradingEngine terminou inesperadamente.")
-                break
-            except redis.exceptions.ConnectionError as e:
-                 logger.critical(f"TE perdeu conexão Redis: {e}. Tentando reconectar pubsub...", exc_info=False)
-                 try:
-                     if pubsub: pubsub.close() 
-                 except: pass
-                 while True:
-                     time.sleep(10)
-                     try:
-                         logger.info("Tentando reconectar PubSub Redis...")
-                         pubsub = self.redis_client.pubsub(ignore_subscribe_messages=True)
-                         pubsub.subscribe(**{
-                             KLINE_CHANNEL: self._on_new_candle,
-                             ORDER_UPDATE_CHANNEL: self._on_order_update
-                         })
-                         logger.info("PubSub Redis reconectado!")
-                         break
-                     except redis.exceptions.ConnectionError:
-                         logger.error("Falha ao reconectar PubSub Redis. Tentando novamente em 10s...")
-                     except Exception as reconn_err:
-                         logger.critical(f"Erro CRÍTICO ao tentar reconectar PubSub Redis: {reconn_err}. Encerrando TE.", exc_info=True)
-                         self.alerter.send_message("🚨 ERRO CRÍTICO: TE não conseguiu reconectar ao Redis PubSub.")
-                         return
+                # Processa uma mensagem com timeout de 1s. Retorna None se nada chegar.
+                message = pubsub.get_message(timeout=1.0)
+                if message:
+                    # A biblioteca chama o handler correto automaticamente
+                    pass
+                else:
+                    # Se não houver mensagens, é uma boa hora para enviar um heartbeat.
+                    # A lógica de heartbeat já está dentro dos handlers, mas uma aqui garante
+                    # que o heartbeat seja enviado mesmo sem novas velas ou ordens.
+                    self.redis_client.set(f"heartbeat:{self.__class__.__name__}", int(time.time()))
             except KeyboardInterrupt:
                  logger.info("TradingEngine recebendo sinal de interrupção...")
                  break
             except Exception as e:
-                 logger.critical(f"Erro FATAL no loop listen() do TE: {e}. Encerrando.", exc_info=True)
+                 logger.critical(f"Erro FATAL no loop de mensagens do TE: {e}. Encerrando.", exc_info=True)
                  self.alerter.send_message(f"🚨 ERRO CRÍTICO TE (loop): {e}")
                  break
 

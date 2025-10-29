@@ -1,18 +1,12 @@
 #!/bin/sh
-# entrypoint.sh
 
-# Sincroniza o tempo do sistema do container usando um servidor NTP.
+# A Sincronização de tempo (ntpdate) foi removida.
+# O container Docker usará automaticamente o relógio da sua máquina host (Windows 11).
+# Tentar sincronizar o tempo de dentro do container era a causa do erro anterior.
 
-# É uma boa prática em aplicações financeiras para evitar problemas com timestamps.
-echo "Sincronizando o tempo do container..."
-if ! ntpdate -u pool.ntp.org; then
-    echo "ERRO CRÍTICO: Falha ao sincronizar o tempo com ntpdate. Encerrando."
-    exit 1
-fi
-echo "Sincronização de tempo concluída."
+echo "Entrypoint iniciado com sucesso."
+echo "Executando o comando principal (CMD): $@"
 
-# O comando "$@" executa o que foi passado como CMD no Dockerfile
-# ou na linha de comando (ex: docker run ... <comando>).
-# Isso permite que o CMD seja facilmente sobrescrito, se necessário.
-echo "Iniciando a aplicação principal..."
+# Este comando executa o que foi definido como CMD no seu Dockerfile ou docker-compose.yml
+# (que no seu caso é "python main.py")
 exec "$@"
