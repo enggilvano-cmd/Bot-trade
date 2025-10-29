@@ -5,19 +5,20 @@ FROM python:3.10 AS builder
 
 # Instala dependências do sistema necessárias para COMPILAR pacotes Python
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libpq5 \
+    build-essential \
+    libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Cria um ambiente virtual que será copiado para a imagem final
+# Cria um ambiente virtual que será copiado para la imagem final
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
-# Atualiza o pip para a versão mais recente para garantir o melhor resolvedor de dependências e evitar bugs.
+# Atualiza o pip
 RUN pip install --upgrade pip
 
-# Copia o arquivo de dependências primeiro para aproveitar o cache do Docker
+# Copia o arquivo de dependências
 COPY requirements.txt .
-# Instala as dependências de forma limpa e direta.
+# Instala as dependências
 RUN pip install --no-cache-dir -r requirements.txt
 
 # -----------------------------------------------------------------
@@ -27,7 +28,6 @@ FROM python:3.10-slim
 
 # Instala apenas as dependências de sistema MÍNIMAS para a EXECUÇÃO
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ntpsec-ntpdate \
     libpq5 \
     && rm -rf /var/lib/apt/lists/*
 
@@ -42,6 +42,7 @@ WORKDIR /app
 
 # Copia o código da aplicação (incluindo o entrypoint.sh)
 COPY . .
+# [CORREÇÃO WINDOWS] Garante que o script seja executável E tenha as quebras de linha corretas
 RUN sed -i 's/\r$//' /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 
