@@ -49,6 +49,15 @@ class DataCollector:
     def _handle_kline(self, msg):
         """Callback para novas velas do WebSocket (V5)."""
         try:
+            # --- CORREÇÃO DE BUG (HEARTBEAT) ---
+            # Atualiza o heartbeat em CADA mensagem recebida do WebSocket (mesmo pings).
+            # Isso prova que a conexão está viva e o callback está rodando.
+            try:
+                self.redis_client.set(f"heartbeat:{self.__class__.__name__}", int(time.time()))
+            except redis.exceptions.ConnectionError as redis_err:
+                 logger.error(f"DC Heartbeat: Erro conexão Redis: {redis_err}")
+            # ------------------------------------
+
             if isinstance(msg, dict) and 'topic' in msg and msg['topic'].startswith('kline.') and 'data' in msg:
                 for candle in msg.get('data', []):
                     if isinstance(candle, dict) and candle.get('confirm') is True:
@@ -65,18 +74,11 @@ class DataCollector:
                         start_ts_ms = int(start_ts_ms_str)
                         kline_timestamp = datetime.fromtimestamp(start_ts_ms / 1000, tz=timezone.utc)
 
-                        # --- [CORREÇÃO] Passar o datetime com fuso (aware) diretamente ---
-                        # O models.py foi atualizado para DateTime(timezone=True)
                         kline_obj = Kline(
-                            symbol=self.symbol, 
-                            timestamp=kline_timestamp, # <-- CORRIGIDO
-                            open=float(open_p), 
-                            high=float(high_p), 
-                            low=float(low_p),
-                            close=float(close_p), 
-                            volume=float(volume_v)
+                            symbol=self.symbol, timestamp=kline_timestamp.replace(tzinfo=None),
+                            open=float(open_p), high=float(high_p), low=float(low_p),
+                            close=float(close_p), volume=float(volume_v)
                         )
-                        # ---------------------------------------------------------------
 
                         saved_to_db = False
                         with SessionLocal() as db_session:
@@ -94,14 +96,14 @@ class DataCollector:
                         if saved_to_db:
                              try:
                                   candle_data = {
-                                      "symbol": self.symbol, 
-                                      "timestamp": kline_timestamp.isoformat(), # isoformat() inclui o fuso
+                                      "symbol": self.symbol, "timestamp": kline_timestamp.isoformat(),
                                       "open": float(open_p), "high": float(high_p), "low": float(low_p),
                                       "close": float(close_p), "volume": float(volume_v)
                                   }
                                   self.redis_client.publish(KLINE_CHANNEL, json.dumps(candle_data))
-                                  logger.info(f"Vela {self.symbol} {interval_v}m @ {kline_timestamp.strftime('%Y-%m-%d %H:%M:%S %Z')} salva/publicada.")
-                                  self.redis_client.set(f"heartbeat:{self.__class__.__name__}", int(time.time()))
+                                  logger.info(f"Vela {self.symbol} {interval_v}m @ {kline_timestamp.strftime('%Y-%m-%d %H:%M:%S')} salva/publicada.")
+                                  # O heartbeat foi movido para o topo da função.
+                                  # self.redis_client.set(f"heartbeat:{self.__class__.__name__}", int(time.time()))
                              except redis.exceptions.ConnectionError as redis_err:
                                   logger.error(f"Erro Redis (publish/heartbeat): {redis_err}")
                              except Exception as pub_e:
@@ -127,12 +129,15 @@ class DataCollector:
              logger.critical(f"Falha ao iniciar stream público WebSocket V5: {e}", exc_info=True)
              raise
 
+        # --- CORREÇÃO DE BUG (HEARTBEAT) ---
+        # O loop principal agora apenas mantém o processo vivo.
+        # O heartbeat é enviado SOMENTE pelo callback _handle_kline,
+        # provando que o WebSocket está de fato funcionando.
         while True:
             try:
-                # O stream roda em background, apenas enviar heartbeats
-                self.redis_client.set(f"heartbeat:{self.__class__.__name__}", int(time.time()))
+                time.sleep(30) # Apenas mantém o thread principal vivo
             except redis.exceptions.ConnectionError as redis_err:
-                 logger.error(f"DC Heartbeat: Erro conexão Redis: {redis_err}")
+                 logger.error(f"DC: Erro conexão Redis no loop sleep: {redis_err}")
             except Exception as e:
-                logger.error(f"DC Heartbeat: Erro: {e}", exc_info=True)
-            time.sleep(30) # Heartbeat a cada 30s
+                logger.error(f"DC: Erro no loop sleep: {e}", exc_info=True)
+        # ------------------------------------
