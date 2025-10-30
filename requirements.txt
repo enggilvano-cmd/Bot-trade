@@ -7,4 +7,4 @@ tenacity
 python-telegram-bot
 pandas
 backtesting
-pandas-ta
+pandas_ta
