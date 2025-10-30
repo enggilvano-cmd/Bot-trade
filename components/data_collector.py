@@ -8,7 +8,8 @@ from datetime import datetime, timezone
 from pybit.unified_trading import WebSocket as UnifiedWebSocket
 from database.database import SessionLocal
 from database.models import Kline
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import IntegrityError # Keep for fallback if needed
 
 logger = logging.getLogger(__name__)
 KLINE_CHANNEL = f"klines:{os.getenv('SYMBOL', 'BTCUSDT')}"
@@ -75,20 +76,23 @@ class DataCollector:
                         kline_timestamp = datetime.fromtimestamp(start_ts_ms / 1000, tz=timezone.utc)
 
                         kline_obj = Kline(
-                            symbol=self.symbol, timestamp=kline_timestamp.replace(tzinfo=None),
+                            symbol=self.symbol, timestamp=kline_timestamp, # Store with timezone
                             open=float(open_p), high=float(high_p), low=float(low_p),
                             close=float(close_p), volume=float(volume_v)
                         )
 
                         saved_to_db = False
                         with SessionLocal() as db_session:
+                            # Use the more efficient ON CONFLICT DO NOTHING, same as backfill.py
                             try:
-                                db_session.merge(kline_obj)
+                                stmt = pg_insert(Kline).values(
+                                    symbol=kline_obj.symbol, timestamp=kline_obj.timestamp,
+                                    open=kline_obj.open, high=kline_obj.high, low=kline_obj.low,
+                                    close=kline_obj.close, volume=kline_obj.volume
+                                ).on_conflict_do_nothing(constraint='_symbol_timestamp_uc')
+                                result = db_session.execute(stmt)
                                 db_session.commit()
-                                saved_to_db = True
-                            except IntegrityError:
-                                logger.warning(f"Dado duplicado (IntegrityError) {self.symbol} @ {kline_timestamp}, pulando.")
-                                db_session.rollback()
+                                saved_to_db = result.rowcount > 0
                             except Exception as e:
                                 logger.error(f"Erro ao salvar vela DB ({kline_timestamp}): {e}", exc_info=True)
                                 db_session.rollback()
